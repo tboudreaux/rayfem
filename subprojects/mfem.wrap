@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/mfem/mfem.git
+revision = v4.8-rc0
+diff_files = mfem/disable_mfem_selfcheck.patch
+depth = 1
+
+[cmake]

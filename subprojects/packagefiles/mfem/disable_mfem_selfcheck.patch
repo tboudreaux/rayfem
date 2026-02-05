@@ -1,0 +1,41 @@
+--- mfem/CMakeLists.txt	2025-02-12 15:54:52.454728232 -0500
++++ CMakeLists.txt.bak	2025-02-12 16:08:06.654542689 -0500
+@@ -765,7 +765,7 @@
+ if (MFEM_ENABLE_EXAMPLES)
+   add_subdirectory(examples) #install examples if enabled
+ else()
+-  add_subdirectory(examples EXCLUDE_FROM_ALL)
++  # add_subdirectory(examples EXCLUDE_FROM_ALL)
+ endif()
+ 
+ # Create a target for all miniapps and, optionally, enable it.
+@@ -774,7 +774,7 @@
+ if (MFEM_ENABLE_MINIAPPS)
+   add_subdirectory(miniapps) #install miniapps if enabled
+ else()
+-  add_subdirectory(miniapps EXCLUDE_FROM_ALL)
++  # add_subdirectory(miniapps EXCLUDE_FROM_ALL)
+ endif()
+ 
+ # Target to build all executables, i.e. everything.
+@@ -801,19 +801,7 @@
+   add_dependencies(${MFEM_EXEC_PREREQUISITES_TARGET_NAME} copy_data)
+ endif()
+ 
+-# Add 'check' target - quick test
+-set(MFEM_CHECK_TARGET_NAME ${MFEM_CUSTOM_TARGET_PREFIX}check)
+-if (NOT MFEM_USE_MPI)
+-  add_custom_target(${MFEM_CHECK_TARGET_NAME}
+-    ${CMAKE_CTEST_COMMAND} -R \"^ex1_ser\" -C ${CMAKE_CFG_INTDIR}
+-    USES_TERMINAL)
+-  add_dependencies(${MFEM_CHECK_TARGET_NAME} ex1)
+-else()
+-  add_custom_target(${MFEM_CHECK_TARGET_NAME}
+-    ${CMAKE_CTEST_COMMAND} -R \"^ex1p\" -C ${CMAKE_CFG_INTDIR}
+-    USES_TERMINAL)
+-  add_dependencies(${MFEM_CHECK_TARGET_NAME} ex1p)
+-endif()
++message(STATUS "MFEM Miniapps and Examples disabled by patch!")
+ 
+ #-------------------------------------------------------------------------------
+ # Documentation
