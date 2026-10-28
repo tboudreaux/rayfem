@@ -94,6 +94,27 @@ FieldRange EvaluateFieldRange(mfem::Mesh& mesh, mfem::GridFunction& field,
         if (!sampling.subdivisions) for (auto& element:elements) if (element.subdivisions>element.minimum) {
             element.subdivisions=std::max(element.minimum,element.subdivisions-2);reduced=true;
         }
+        if (!reduced && sampling.reduce_to_fit) {
+            if (!result.lattice_dropped) {
+                // Vertices plus FE nodes and center still bound nodal fields well.
+                for (auto& element:elements) element.subdivisions=1;
+                result.lattice_dropped=reduced=true;
+            } else {
+                // Keep an evenly strided subset, sized from the current total.
+                std::size_t total=0;
+                for (const auto element:elements)
+                    total+=LatticeCount(mesh.GetElementBaseGeometry(element.index),element.subdivisions)+element.nodes+1;
+                const std::size_t stride=std::max<std::size_t>(2,(total+sampling.max_samples-1)/sampling.max_samples);
+                std::vector<Element> kept;
+                kept.reserve(elements.size()/stride+1);
+                for (std::size_t i=0;i<elements.size();i+=stride) kept.push_back(elements[i]);
+                if (kept.size()<elements.size()) {
+                    result.skipped_elements+=elements.size()-kept.size();
+                    elements=std::move(kept);
+                    reduced=true;
+                }
+            }
+        }
         if (!reduced)
             throw std::runtime_error("Field range sample budget exceeded ("+
                 std::to_string(sampling.max_samples)+"); reduce explicit subdivisions or select fewer materials");

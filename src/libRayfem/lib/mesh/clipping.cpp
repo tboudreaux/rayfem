@@ -54,6 +54,66 @@ Sample sample(mfem::Mesh& mesh,mfem::GridFunction* field,int e,const mfem::Integ
     return {display[e].Apply({float(x[0]),float(x[1]),x.Size()>2?float(x[2]):0}),ip,
             field?RayFEM::EvaluateField(*field,e,ip,o.view,o.component):0,mesh.GetAttribute(e),0};
 }
+// Batched form of sample(): one geometry load and MFEM's per-rule evaluators
+// for a whole element, with the same value semantics as EvaluateField.
+std::vector<Sample> sampleElement(mfem::Mesh& mesh,mfem::GridFunction* field,int e,const mfem::IntegrationRule& points,
+                                  const RenderOptions& o,const DisplayTransforms& display) {
+    auto& transform=*mesh.GetElementTransformation(e);
+    mfem::DenseMatrix x,d,values;
+    transform.Transform(points,x);
+    if(o.displacement){o.displacement->GetVectorValues(transform,points,d);x.Add(o.displacement_scale,d);}
+    const bool derivative=o.view==RayFEM::FieldView::Divergence||o.view==RayFEM::FieldView::CurlMagnitude||
+                          o.view==RayFEM::FieldView::CurlComponent;
+    if(field && !derivative)field->GetVectorValues(transform,points,values);
+    const int attribute=mesh.GetAttribute(e);
+    std::vector<Sample> result;
+    result.reserve(points.GetNPoints());
+    mfem::Vector column;
+    for(int i=0;i<points.GetNPoints();++i) {
+        for(int r=0;r<x.Height();++r) if(!std::isfinite(x(r,i))) throw std::runtime_error("Non-finite clipping geometry");
+        double value=0;
+        if(field) {
+            if(derivative) {
+                transform.SetIntPoint(&points.IntPoint(i));
+                if(o.view==RayFEM::FieldView::Divergence)value=field->GetDivergence(transform);
+                else {field->GetCurl(transform,column);value=o.view==RayFEM::FieldView::CurlMagnitude?column.Norml2():column[o.component];}
+            } else {
+                values.GetColumnReference(i,column);
+                value=o.view==RayFEM::FieldView::Component?column[o.component]:
+                      (o.view==RayFEM::FieldView::Value&&column.Size()==1?column[0]:column.Norml2());
+            }
+            if(!std::isfinite(value))throw std::runtime_error("Field contains non-finite sampled values");
+        }
+        result.push_back({display[e].Apply({float(x(0,i)),float(x(1,i)),x.Height()>2?float(x(2,i)):0}),
+                          points.IntPoint(i),value,attribute,0});
+    }
+    return result;
+}
+mfem::IntegrationRule mappedRule(const mfem::IntegrationRule& face,mfem::IntegrationPointTransformation* map) {
+    mfem::IntegrationRule result(face.GetNPoints());
+    for(int i=0;i<face.GetNPoints();++i){result.IntPoint(i)=face.IntPoint(i);if(map){auto local=face.IntPoint(i);map->Transform(local,result.IntPoint(i));}}
+    return result;
+}
+// Conservative plane test from a coarse lattice. Linear (and exploded linear)
+// cells lie in the hull of their vertices; curved or displaced cells get a
+// margin of half a lattice cell for bulges between sampled points.
+bool mayCross(mfem::Mesh& mesh,int e,const RenderOptions& o,const DisplayTransforms& display,const Plane& plane,
+              mfem::GeometryRefiner& refiner) {
+    int order=mesh.GetElementTransformation(e)->Order();
+    if(o.displacement)order=std::max(order,o.displacement->FESpace()->GetElementOrder(e));
+    const int n=std::clamp(order,1,8);
+    const auto* rg=refiner.Refine(mesh.GetElementBaseGeometry(e),n,1);
+    const auto points=sampleElement(mesh,nullptr,e,rg->RefPts,o,display);
+    double lo=std::numeric_limits<double>::infinity(),hi=-lo;
+    Vector3 low=points[0].p,high=points[0].p;
+    for(const auto& s:points) {
+        const double d=plane.distance(s.p);lo=std::min(lo,d);hi=std::max(hi,d);
+        low={std::min(low.x,s.p.x),std::min(low.y,s.p.y),std::min(low.z,s.p.z)};
+        high={std::max(high.x,s.p.x),std::max(high.y,s.p.y),std::max(high.z,s.p.z)};
+    }
+    const double margin=order>1||(o.displacement&&o.displacement_scale!=0)?.5*norm(sub(high,low))/n:0;
+    return lo<=plane.eps+margin && hi>=-plane.eps-margin;
+}
 Sample interpolate(const Sample& a,const Sample& b,double t,mfem::GridFunction* field,int e,const RenderOptions& o) {
     const auto ip=mixIP(a.ip,b.ip,t);
     return {add(a.p,scale(sub(b.p,a.p),t)),ip,field?RayFEM::EvaluateField(*field,e,ip,o.view,o.component):0,a.material,a.boundary,
@@ -243,11 +303,12 @@ ClippedSurface BuildClippedSurface(mfem::Mesh& mesh,mfem::GridFunction* field,co
     const auto boundary_attributes=FaceBoundaryAttributes(mesh);
     patches(mesh,options,&retained,selection,[&](int e,mfem::Geometry::Type g,mfem::IntegrationPointTransformation* map,bool reverse,int face) {
         const auto* rg=refiner.Refine(g,refinement,1);
-        std::vector<Sample> points;
+        const auto parent=mappedRule(rg->RefPts,map);
+        auto points=sampleElement(mesh,field,e,parent,options,display);
+        auto& transform=*mesh.GetElementTransformation(e);
         for(int i=0;i<rg->RefPts.GetNPoints();++i) {
-            auto ip=rg->RefPts.IntPoint(i);if(map){auto local=ip;map->Transform(local,ip);}points.push_back(sample(mesh,field,e,ip,options,display));
-            points.back().boundary=mesh.Dimension()==3?boundary_attributes[face]:0;
-            points.back().normal=detail::SurfaceNormal(*mesh.GetElementTransformation(e),ip,options,map,&rg->RefPts.IntPoint(i));
+            points[i].boundary=mesh.Dimension()==3?boundary_attributes[face]:0;
+            points[i].normal=detail::SurfaceNormal(transform,parent.IntPoint(i),options,map,&rg->RefPts.IntPoint(i));
         }
         const int stride=mfem::Geometry::NumVerts[g];
         for(int j=0;j<rg->RefGeoms.Size();j+=stride)for(int tri=0;tri<(stride==4?2:1);++tri) {
@@ -271,14 +332,26 @@ ClippedSurface BuildClippedSurface(mfem::Mesh& mesh,mfem::GridFunction* field,co
         std::size_t sampled_points=0;
         Vector3 u=unit(cross(plane.n,std::abs(plane.n.y)<0.9?Vector3{0,1,0}:Vector3{1,0,0}));
         Vector3 v=cross(plane.n,u);
+        // Only cells the plane can reach contribute a section; testing them
+        // first keeps the cost proportional to the cut, not the volume.
+        std::vector<bool> crossing(mesh.GetNE(),false);
+        for(int e=0;e<mesh.GetNE();++e)crossing[e]=retained[e]&&mayCross(mesh,e,options,display,plane,refiner);
+        // Coarsen the section rather than fail when a large cut exceeds the budget.
+        int section=algorithm==CutAlgorithm::Refined?refinement:1;
+        auto section_points=[&](int r) {
+            std::size_t total=0;
+            for(int e=0;e<mesh.GetNE();++e)if(crossing[e])total+=refiner.Refine(mesh.GetElementBaseGeometry(e),r,1)->RefPts.GetNPoints();
+            return total;
+        };
+        while(section>1 && section_points(section)>2000000)--section;
+        result.section_refinement=section;
         for(int e=0;e<mesh.GetNE();++e) {
-            if(!retained[e])continue;
+            if(!crossing[e])continue;
             const auto g=mesh.GetElementBaseGeometry(e);
-            const auto* rg=refiner.Refine(g,algorithm==CutAlgorithm::Refined?refinement:1,1);
+            const auto* rg=refiner.Refine(g,section,1);
             sampled_points+=rg->RefPts.GetNPoints();
             if(sampled_points>2000000)throw std::runtime_error("Clipping sample budget exceeded; reduce refinement");
-            std::vector<Sample> points;
-            for(int i=0;i<rg->RefPts.GetNPoints();++i)points.push_back(sample(mesh,field,e,rg->RefPts.IntPoint(i),options,display));
+            const auto points=sampleElement(mesh,field,e,rg->RefPts,options,display);
             const int stride=mfem::Geometry::NumVerts[g];
             for(int offset=0;offset<rg->RefGeoms.Size();offset+=stride) {
                 const bool tetra=g==mfem::Geometry::PYRAMID && rg->RefGeoms[offset+4]<0;
@@ -318,10 +391,9 @@ ClippedSurface BuildClippedSurface(mfem::Mesh& mesh,mfem::GridFunction* field,co
         }
         // Intersections with original element faces outline cut elements without
         // drawing the internal diagonals used to triangulate the section itself.
-        patches(mesh,options,&retained,selection,[&](int e,mfem::Geometry::Type g,mfem::IntegrationPointTransformation* map,bool,int) {
-            const auto* rg=refiner.Refine(g,algorithm==CutAlgorithm::Refined?refinement:1,1);
-            std::vector<Sample> points;
-            for(int i=0;i<rg->RefPts.GetNPoints();++i){auto ip=rg->RefPts.IntPoint(i);auto local=ip;map->Transform(local,ip);points.push_back(sample(mesh,nullptr,e,ip,options,display));}
+        patches(mesh,options,&crossing,selection,[&](int e,mfem::Geometry::Type g,mfem::IntegrationPointTransformation* map,bool,int) {
+            const auto* rg=refiner.Refine(g,section,1);
+            const auto points=sampleElement(mesh,nullptr,e,mappedRule(rg->RefPts,map),options,display);
             const int stride=mfem::Geometry::NumVerts[g];
             for(int j=0;j<rg->RefGeoms.Size();j+=stride){std::vector<Sample> polygon;for(int k=0;k<stride;++k)polygon.push_back(points[rg->RefGeoms[j+k]]);intersectPolygon(polygon,plane,result.element_boundaries);}
         },true);

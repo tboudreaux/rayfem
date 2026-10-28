@@ -84,4 +84,45 @@ void nurbs(const std::string& data){
     std::cout<<"PASS original rational NURBS clipping, no node mutation\n";
 }
 }
-int main(int argc,char** argv){try{boundaries();basics(mfem::Element::HEXAHEDRON);basics(mfem::Element::TETRAHEDRON);curved();vectors();nurbs(argc>1?argv[1]:"subprojects/mfem/data");}catch(const std::exception& e){std::cerr<<"Clipping test failed: "<<e.what()<<'\n';return 1;}std::cout<<"Clipping tests passed\n";}
+// Only cells the plane reaches are sampled, so large meshes stay within budget.
+void large(){
+    auto mesh=mfem::Mesh::MakeCartesian3D(36,36,36,mfem::Element::HEXAHEDRON);
+    mfem::H1_FECollection h1(1,3);mfem::FiniteElementSpace space(&mesh,&h1);mfem::GridFunction field(&space);
+    mfem::FunctionCoefficient ramp([](const mfem::Vector& x){return x[1];});field.ProjectCoefficient(ramp);
+    RayFEM::RenderOptions o;o.refinement=3;
+    const float position=.51f;
+    auto result=RayFEM::BuildClippedSurface(mesh,&field,o,{{position,0,0},{1,0,0}},RayFEM::ClipMode::CutThrough,RayFEM::CutAlgorithm::Refined);
+    near(area(result.surface,true,position),1,2e-4,"Large-mesh section cap area");
+    near(area(result.surface),2+4*position,2e-4,"Large-mesh clipped closed surface area");
+    check(result.section_refinement==3,"Small cuts keep the requested section refinement");
+    // 36^2 cut cells at 64^3 subdivisions would need 85M points; coarsen instead.
+    o.refinement=64;
+    auto coarse=RayFEM::BuildClippedSurface(mesh,nullptr,o,{{position,0,0},{1,0,0}},RayFEM::ClipMode::CutThrough,RayFEM::CutAlgorithm::Refined);
+    check(coarse.section_refinement>=1 && coarse.section_refinement<24,"Large cuts coarsen the section");
+    near(area(coarse.surface,true,position),1,2e-4,"Coarsened section cap area");
+}
+// A curved, warped mesh whose cells bulge between lattice nodes keeps its cap.
+void curvedCap(){
+    auto mesh=mfem::Mesh::MakeCartesian3D(3,3,3,mfem::Element::HEXAHEDRON);mesh.SetCurvature(4);
+    mfem::VectorFunctionCoefficient warp(3,[](const mfem::Vector& x,mfem::Vector& y){y=x;y[0]+=.06*std::sin(6.28318*x[1])*std::sin(6.28318*x[2]);});
+    mesh.Transform(warp);
+    RayFEM::RenderOptions o;o.refinement=8;
+    for(float position:{.31f,.5f,.69f}){
+        auto result=RayFEM::BuildClippedSurface(mesh,nullptr,o,{{position,0,0},{1,0,0}},RayFEM::ClipMode::CutThrough,RayFEM::CutAlgorithm::Refined);
+        // The linearized section of the curved body slightly overestimates 1;
+        // a cell missed by the plane pre-test would remove area instead.
+        near(area(result.surface,true,position),1,1e-2,"Curved section cap area");
+    }
+}
+// The quadratic face x=1+.2(y(1-y)+.3y) peaks at y=.65, between its nodes
+// (largest node x is 1.08, true maximum 1.0845). A plane between them still
+// cuts the cell, so the coarse pre-test must not reject it.
+void bulgeBetweenNodes(){
+    auto mesh=mfem::Mesh::MakeCartesian3D(1,1,1,mfem::Element::HEXAHEDRON);mesh.SetCurvature(2);
+    mfem::VectorFunctionCoefficient warp(3,[](const mfem::Vector& x,mfem::Vector& y){y=x;y[0]+=.2*x[0]*(x[1]*(1-x[1])+.3*x[1]);});
+    mesh.Transform(warp);
+    RayFEM::RenderOptions o;o.refinement=8;
+    auto result=RayFEM::BuildClippedSurface(mesh,nullptr,o,{{1.082f,0,0},{1,0,0}},RayFEM::ClipMode::CutThrough,RayFEM::CutAlgorithm::Refined);
+    check(area(result.surface,true,1.082)>0,"Section of a cell bulging past its nodes");
+}
+int main(int argc,char** argv){try{large();curvedCap();bulgeBetweenNodes();boundaries();basics(mfem::Element::HEXAHEDRON);basics(mfem::Element::TETRAHEDRON);curved();vectors();nurbs(argc>1?argv[1]:"subprojects/mfem/data");}catch(const std::exception& e){std::cerr<<"Clipping test failed: "<<e.what()<<'\n';return 1;}std::cout<<"Clipping tests passed\n";}

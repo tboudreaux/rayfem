@@ -435,8 +435,26 @@ void ArchiveBenchmark(const std::string& path) {
     }
 }
 }
+// Viewer meshes larger than the budget degrade instead of losing the field.
+void ReduceToFit() {
+    auto mesh=mfem::Mesh::MakeCartesian3D(4,4,4,mfem::Element::HEXAHEDRON);
+    mfem::H1_FECollection h1(1,3);mfem::FiniteElementSpace space(&mesh,&h1);mfem::GridFunction field(&space);
+    mfem::FunctionCoefficient ramp([](const mfem::Vector& x){return x[0];});field.ProjectCoefficient(ramp);
+    Reject([&]{EvaluateFieldRange(mesh,field,{}, {.max_samples=1100});},"budget");
+    // 64 cells x (8 vertices + 8 nodes + center) fits once lattices are dropped.
+    const auto vertices=EvaluateFieldRange(mesh,field,{}, {.max_samples=1100,.reduce_to_fit=true});
+    Check(vertices.budget_limited && vertices.lattice_dropped && !vertices.skipped_elements &&
+          vertices.element_count==64 && vertices.sample_count==1088,"Dropping lattices keeps every element");
+    Near(vertices.min_value,0,1e-14,"Vertex samples keep the minimum");Near(vertices.max_value,1,1e-14,"Vertex samples keep the maximum");
+    const auto strided=EvaluateFieldRange(mesh,field,{}, {.max_samples=200,.distribution_samples=50,.reduce_to_fit=true});
+    Check(strided.lattice_dropped && strided.skipped_elements>0 && strided.sample_count<=200 &&
+          strided.element_count+strided.skipped_elements==64 && strided.samples.size()==50,"Strided elements fit the budget");
+    Check(strided.min_value>=0 && strided.max_value<=1 && strided.min_value<strided.max_value,"Strided range stays within the field");
+    Reject([&]{EvaluateFieldRange(mesh,field,{}, {.max_samples=10,.reduce_to_fit=true});},"budget");
+}
+
 int main(int argc,char** argv) {try {
-    InteriorPeak();MaterialsAndValidation();DistributionSampling();VectorOperations();
+    ReduceToFit();InteriorPeak();MaterialsAndValidation();DistributionSampling();VectorOperations();
     OtherGeometries(argc>1?argv[1]:"subprojects/mfem/data");ColorLimits();ColorRendering();ZScaleRendering();VariableOrderAndOrdering();
     if(argc>2)Benchmark(argv[2]);
     if(argc>3)ArchiveBenchmark(argv[3]);

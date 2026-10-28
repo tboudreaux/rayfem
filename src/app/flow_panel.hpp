@@ -317,7 +317,7 @@ private:
             RayFEM::RenderOptions options;options.view=RayFEM::FieldView::Magnitude;
             options.excluded_materials=result->excluded;
             options.excluded_elements=result->excludedElements;
-            result->range=RayFEM::EvaluateFieldRange(*frame->mesh,field,options,{.distribution_samples=1000});
+            result->range=RayFEM::EvaluateFieldRange(*frame->mesh,field,options,{.distribution_samples=1000,.reduce_to_fit=true});
         } catch(const std::exception& error) {result->error=error.what();}
         ranges.push_back(result);while(ranges.size()>64)ranges.pop_front();
         return result;

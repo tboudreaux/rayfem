@@ -17,6 +17,12 @@ struct FieldRangeOptions {
     // deterministic sample sequence. Zero (the default) retains none.
     // This does not reduce extrema sampling or favor early elements.
     std::size_t distribution_samples = 0;
+    // When true, a mesh too large for max_samples even at the minimum lattice
+    // degrades instead of throwing: each element first keeps only its
+    // vertices, FE nodes and center, then an evenly strided subset of elements
+    // is sampled. FieldRange reports both reductions. Default false keeps the
+    // strict budget error.
+    bool reduce_to_fit = false;
 };
 
 struct FieldRange {
@@ -24,6 +30,10 @@ struct FieldRange {
     std::size_t sample_count = 0, element_count = 0;
     int max_subdivisions = 0, min_subdivisions = 0;
     bool budget_limited = false;
+    // reduce_to_fit only: element lattices dropped to vertices, and the number
+    // of included elements left unsampled to fit the budget.
+    bool lattice_dropped = false;
+    std::size_t skipped_elements = 0;
     std::vector<double> samples;
 };
 

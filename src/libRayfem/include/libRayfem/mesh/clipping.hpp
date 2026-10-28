@@ -13,6 +13,9 @@ struct ClippedSurface {
     // WholeElements: one flag per original element, using the same displaced,
     // optionally exploded corner selection as surface generation. Empty for CutThrough.
     std::vector<bool> retained_elements;
+    // CutThrough in 3D: subdivisions used for the section through cut cells.
+    // Lower than the requested refinement when the cut is too large to sample.
+    int section_refinement = 0;
 };
 
 // Original finite-element edges, subdivided through the parent geometry map.

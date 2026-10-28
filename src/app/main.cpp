@@ -114,6 +114,7 @@ struct ViewCache {
     size_t vertices = 0;
     size_t rangeSamples = 0;
     bool rangeBudgetLimited = false;
+    std::size_t rangeSkippedElements = 0;
     bool hasFieldRange = false;
     RayFEM::ColorScaleMapping colorMapping{};
     double volumeMin=0,volumeMax=0;
@@ -437,6 +438,7 @@ private:
         }
         RayFEM::FieldRangeOptions sampling;
         sampling.distribution_samples=1000;
+        sampling.reduce_to_fit=true;
         auto range=RayFEM::EvaluateFieldRange(*frame->mesh,field,options,sampling);
         ranges.push_back({frame,fieldName,options.view,options.component,options.excluded_materials,options.excluded_elements,range});
         if(ranges.size()>64) ranges.pop_front();
@@ -500,6 +502,7 @@ private:
                 entry.volumeMin=range.min_value;entry.volumeMax=range.max_value;
                 entry.rangeSamples=range.sample_count;
                 entry.rangeBudgetLimited=range.budget_limited;
+                entry.rangeSkippedElements=range.skipped_elements;
                 entry.rangeDistribution=range.samples;
                 entry.hasFieldRange=true;
             }
@@ -1279,6 +1282,8 @@ private:
                 if(automaticColorRange) {
                     ImGui::Text("%zu volume samples",active->rangeSamples);
                     if(active->rangeBudgetLimited) ImGui::TextUnformatted("Sampling detail reduced to fit the volume budget.");
+                    if(active->rangeSkippedElements)
+                        ImGui::Text("Large mesh: %zu elements not sampled; limits are approximate.",active->rangeSkippedElements);
                     ImGui::TextUnformatted("Includes clipped regions. Hidden elements and materials are excluded.");
                 } else ImGui::TextUnformatted("Fixed limits across frames. Change them under Color scale.");
                 ImGui::EndTooltip();
