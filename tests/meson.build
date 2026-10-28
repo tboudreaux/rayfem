@@ -35,6 +35,10 @@ clipping_test = executable('clipping_test', 'clipping_test.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 test('clipping', clipping_test, args: [meson.project_source_root() / 'subprojects/mfem/data'], timeout: 120)
 
+contours_test = executable('contours_test', 'contours_test.cpp',
+    dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
+test('contours', contours_test, timeout: 60)
+
 # Requires a desktop graphics session; run explicitly (see README).
 executable('viewer_test', 'viewer_test.cpp', dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 executable('curvature_viewer_test', 'curvature_viewer_test.cpp',

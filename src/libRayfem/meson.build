@@ -10,6 +10,7 @@ sources = files(
     'lib/mesh/clipping.cpp',
     'lib/mesh/field_range.cpp',
     'lib/mesh/element_statistics.cpp',
+    'lib/mesh/contours.cpp',
     'lib/profile/sampler.cpp',
     'lib/profile/surface_trace.cpp',
     'lib/frame/tracking.cpp',

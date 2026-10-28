@@ -5,6 +5,7 @@
 #include "libRayfem/frame/render.hpp"
 #include "libRayfem/mesh/clipping.hpp"
 #include "libRayfem/mesh/color_scale.hpp"
+#include "libRayfem/mesh/contours.hpp"
 #include "libRayfem/mesh/converter.hpp"
 #include "libRayfem/mesh/field_range.hpp"
 #include "libRayfem/network/server.hpp"
@@ -140,6 +141,7 @@ struct SurfaceRequest {
     double minimum = 0, maximum = 1;
     bool boundaries = false;
     bool dofs = false;
+    int contours = 0;  // contour lines to extract with the field colors; 0 for none
 };
 
 struct SurfaceResult {
@@ -156,6 +158,11 @@ struct SurfaceResult {
     ElementPicker picker;
     bool has_range = false;
     ColorScaleMapping mapping{};
+    // Field value per triangle-soup vertex, kept so contours can be redrawn
+    // for new levels without rebuilding the surface.
+    std::vector<float> soup_values;
+    std::vector<LineSegment> contours;
+    std::vector<double> contour_levels;
     double volume_min = 0, volume_max = 0;
     std::size_t range_samples = 0, skipped_elements = 0;
     bool budget_limited = false;
@@ -356,6 +363,11 @@ private:
                 result.skipped_elements = range.skipped_elements;
                 result.distribution = range.samples;
                 result.has_range = true;
+                result.soup_values.assign(result.data.values.begin(), result.data.values.end());
+                if (request.contours > 0) {
+                    result.contour_levels = ContourLevels(result.mapping, request.contours);
+                    result.contours = ExtractContours(result.data.positions, result.soup_values, result.contour_levels);
+                }
             }
             if (request.dofs && field) {
                 result.dofs = SampleDofs(mesh, *field, options, 20000, result.retained.empty() ? nullptr : &result.retained);

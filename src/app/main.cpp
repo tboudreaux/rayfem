@@ -24,6 +24,7 @@
 #include "libRayfem/network/server.hpp"
 #include "libRayfem/mesh/converter.hpp"
 #include "libRayfem/mesh/clipping.hpp"
+#include "libRayfem/mesh/contours.hpp"
 #include "libRayfem/mesh/field_range.hpp"
 #include "libRayfem/io/serif.hpp"
 #include "file_dialog.hpp"
@@ -107,6 +108,7 @@ struct ViewCache {
     float displacement = 1;
     Model model{};
     Model edgeModel{};
+    Model contourModel{};
     Model selectionModel{};
     Model dofModel{};
     std::string dofTracks;
@@ -126,6 +128,12 @@ struct ViewCache {
     std::size_t rangeSkippedElements = 0;
     bool hasFieldRange = false;
     RayFEM::ColorScaleMapping colorMapping{};
+    // Field value per picker triangle-soup vertex, and the contours last
+    // extracted from it for contourLevels.
+    std::vector<float> soupValues;
+    std::vector<RayFEM::LineSegment> contours;
+    std::vector<double> contourLevels;
+    bool contoursUploaded = false;
     double volumeMin=0,volumeMax=0;
     std::vector<RayFEM::DofPoint> dofs;
     std::vector<RayFEM::LineSegment> boundaries;
@@ -409,6 +417,7 @@ private:
     static void ReleaseView(ViewCache& entry) {
         UnloadModel(entry.model);
         UnloadModel(entry.edgeModel);
+        UnloadModel(entry.contourModel);
         UnloadModel(entry.selectionModel);
         UnloadModel(entry.dofModel);
     }
@@ -421,6 +430,7 @@ private:
     void TrimViewCache() {
         auto bytes=[](const ViewCache& entry) {
             return entry.gpuVertices*48+entry.vertices*2+entry.boundaries.size()*464+entry.picker.StorageBytes()+entry.selectionVertices*64+
+                entry.soupValues.size()*sizeof(float)+entry.contours.size()*(sizeof(RayFEM::LineSegment)+432)+
                 entry.dofs.size()*sizeof(RayFEM::DofPoint);
         };
         std::size_t total=0;
@@ -539,6 +549,9 @@ private:
             entry.rangeSkippedElements=result.skipped_elements;
             entry.rangeDistribution=std::move(result.distribution);
             entry.hasFieldRange=true;
+            entry.soupValues=std::move(result.soup_values);
+            entry.contours=std::move(result.contours);
+            entry.contourLevels=std::move(result.contour_levels);
         }
         for (int i=0;i<entry.model.materialCount;++i) entry.model.materials[i].shader=shader;
         entry.build_ms=result.milliseconds;
@@ -596,6 +609,7 @@ private:
             request.automatic_range=automaticColorRange; request.minimum=colorMinimum; request.maximum=colorMaximum;
             request.boundaries=showBoundaries;
             request.dofs=showDofs;
+            request.contours=showContours && coloring==0?contourCount:0;
             pipeline.Request(std::move(request));
             requestedKey=key;
         }
@@ -1124,6 +1138,17 @@ private:
         if(RayFEM::UI::BeginSection("Display")) {
             RayFEM::UI::Switch("Surface",&showSurface);
             RayFEM::UI::Switch("Element edges",&showBoundaries);
+            ImGui::BeginDisabled(coloring!=0);
+            RayFEM::UI::Switch("Contour lines",&showContours);
+            ImGui::EndDisabled();
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort|ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(coloring!=0?"Contours follow the field. Color by Field to show them.":
+                    "Lines of constant field value on the surface and on clipped faces, spaced evenly along the colorbar.");
+            if(showContours && coloring==0) {
+                RayFEM::UI::FieldLabel("Contour levels");
+                ImGui::SliderInt("##contour_levels",&contourCount,1,64,"%d",ImGuiSliderFlags_AlwaysClamp);
+                Tip("Levels split the colorbar evenly, so they follow log and ZScale ranges too.");
+            }
             RayFEM::UI::Switch("DOF points",&showDofs);
             Tip("Hover for coefficient details. Use Pick DOF to add a time trace.");
             RayFEM::UI::FieldLabel("Explode elements");
@@ -1397,7 +1422,7 @@ private:
         SetShaderValue(shader,normalLoc,&normal,SHADER_UNIFORM_VEC3);
         SetShaderValue(shader,pointLoc,&slicePoint,SHADER_UNIFORM_VEC3);
         SetShaderValue(shader,enabledLoc,&enabled,SHADER_UNIFORM_INT);
-        float depthBias=(showBoundaries || wireframe)?1.5f:0;
+        float depthBias=(showBoundaries || wireframe || (showContours && coloring==0))?1.5f:0;
         SetShaderValue(shader,depthBiasLoc,&depthBias,SHADER_UNIFORM_FLOAT);
         BeginTextureMode(target);
         ClearBackground(RayFEM::UI::Palette().viewport_background);
@@ -1435,6 +1460,7 @@ private:
             }
             if (wireframe) DrawModelWires(active->model,{0,0,0},1,RayFEM::UI::Palette().mesh_wire);
             if (showBoundaries) DrawBoundaries(*active);
+            if (showContours && coloring==0) DrawContours(*active);
             const RayFEM::ClipPlane flowPlane{slicePoint,sliceNormal};
             flow.Draw(camera,GetTime(),streamlineRenderer,{float(width),float(height)},active->retainedElements.empty()?nullptr:&active->retainedElements,
                       clip && clipMode==0?&flowPlane:nullptr);
@@ -1702,6 +1728,27 @@ private:
         }
     }
 
+    // Isolines at levels spaced along the colorbar. Streamed surfaces arrive
+    // with them; a new count or color range re-extracts from the kept values.
+    void DrawContours(ViewCache& active) {
+        if(!active.hasFieldRange || active.soupValues.empty())return;
+        try {
+            const auto levels=RayFEM::ContourLevels(active.colorMapping,contourCount);
+            if(levels!=active.contourLevels) {
+                active.contours=RayFEM::ExtractContours(active.picker.Positions(),active.soupValues,levels);
+                active.contourLevels=levels;
+                UnloadModel(active.contourModel);active.contourModel={};active.contoursUploaded=false;
+            }
+            if(!active.contoursUploaded) {
+                active.contourModel=edgeRenderer.Upload(active.contours);
+                active.contoursUploaded=true;
+                TrimViewCache();
+            }
+            edgeRenderer.Draw(active.contourModel,camera,{float(target.texture.width),float(target.texture.height)},
+                radius,RayFEM::UI::Palette().mesh_edges,false);
+        } catch(const std::exception& e){error=e.what();}
+    }
+
     void DrawBoundaries(ViewCache& active) {
         try {
             if (!active.boundaries_ready) {
@@ -1839,6 +1886,8 @@ private:
     std::string fieldName,error,failedKey,requestedKey;
     bool surfaceBuilding=false;
     double buildingSince=-1;
+    bool showContours=false;
+    int contourCount=12;
     bool profileClipping=false,savedClip=false;
     Vector3 savedSlicePoint{},savedSliceNormal{1,0,0};
     bool follow=true,playing=false,wireframe=false,showSurface=true,showBoundaries=true,showDofs=false,deform=true,clip=false,planeGuide=false;

@@ -76,6 +76,8 @@ public:
     }
 
     bool Empty() const { return nodes_.empty(); }
+    // The indexed triangle soup, 9 floats per triangle in build order.
+    std::span<const float> Positions() const { return positions_; }
     std::span<const std::uint32_t> TrianglesForElement(int element) const {
         const auto found = group_lookup_.find(element);
         if (found == group_lookup_.end()) { return {}; }
