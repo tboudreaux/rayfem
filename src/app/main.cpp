@@ -163,6 +163,7 @@ public:
         elementExplosion=opts.explosion;
         flow.SetWorker(&pipeline);
         profiles.SetWorker(&pipeline);
+        surfaceTrace.SetWorker(&pipeline);
         rlImGuiSetup(true);
         ImGui::GetIO().IniFilename = nullptr;
         ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -278,6 +279,7 @@ private:
         profiles.SetWorker(&pipeline);
         tracking = TrackingPanel{};
         surfaceTrace = SurfaceTracePanel{};
+        surfaceTrace.SetWorker(&pipeline);
         flow = FlowPanel{};
         flow.SetWorker(&pipeline);
         elements = ElementPanel{};
@@ -770,6 +772,11 @@ private:
         if(const auto request=profiles.TakePlacementRequest()) {
             if(*request<0)rayPlacement.Begin();else rayPlacement.Edit(*request,profiles.Anchors());
         }
+        if(const auto request=surfaceTrace.TakePlacementRequest()) {
+            using Kind=RayFEM::UI::RayPlacement::Kind;
+            if(request->kind==Kind::Path && request->index>=0)rayPlacement.Edit(Kind::Path,request->index,surfaceTrace.PathPoints());
+            else rayPlacement.Begin(request->kind);
+        }
         surfaceTrace.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
         flow.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
         tracking.SetExcludedMaterials(excludedMaterials,frames);
@@ -910,11 +917,17 @@ private:
                 rlEnableDepthMask();
             }
         };
-        if(const auto anchors=rayPlacement.Draw(frame,coloring==0?Field(frame):nullptr,settings,std::max(4,settings.refinement),
-                                                viewportOrigin,viewportSize,shader,color,camera,context)) {
-            profiles.SetAnchors(*anchors);
-            if(!profiles.Enabled())profiles.OpenRay();
-            inspectorTab=1;plotTab=0;showPlots=true;
+        if(const auto result=rayPlacement.Draw(frame,coloring==0?Field(frame):nullptr,settings,std::max(4,settings.refinement),
+                                               viewportOrigin,viewportSize,shader,color,camera,context)) {
+            if(result->kind==RayFEM::UI::RayPlacement::Kind::Ray) {
+                if(result->anchors.size()==2) profiles.SetAnchors({result->anchors[0],result->anchors[1]});
+                if(!profiles.Enabled())profiles.OpenRay();
+                plotTab=0;
+            } else {
+                surfaceTrace.ApplyPlacement(*result);
+                if(!result->cancelled){profiles.SetMode(0);plotTab=2;}
+            }
+            inspectorTab=1;showPlots=true;
         }
     }
 
@@ -1417,6 +1430,7 @@ private:
                       RayFEM::UI::CardRounding);
         if (active && showDofs) DrawDofs(*active,origin,size,meshHovered);
         profiles.DrawHandles(origin,size,camera);
+        surfaceTrace.DrawOverlay(origin,size,camera);
         if(rayPlacement.Active() && Current()) {
             const Matrix viewProjection=MatrixMultiply(MatrixLookAt(camera.position,camera.target,camera.up),
                 MatrixPerspective(camera.fovy*DEG2RAD,double(width)/double(height),rlGetCullDistanceNear(),rlGetCullDistanceFar()));
@@ -1585,9 +1599,18 @@ private:
             draw->AddText(font,fontSize,{left+padding+iconWidth,y+7},palette.text,text,nullptr,wrap);
             y=b.y+8;
         };
-        if(rayPlacement.Current()==RayFEM::UI::RayPlacement::Step::ChooseElement)
-            banner(ICON_FA_CROSSHAIRS,rayPlacement.Endpoint()==0?"Click the element where the ray starts (step 1 of 2). Drag to orbit; Esc to cancel.":
-                                                                 "Click the element where the ray ends (step 2 of 2). Drag to orbit; Esc to cancel.",palette.accent);
+        if(rayPlacement.Current()==RayFEM::UI::RayPlacement::Step::ChooseElement) {
+            using Kind=RayFEM::UI::RayPlacement::Kind;
+            std::string text;
+            if(rayPlacement.Placing()==Kind::Center) text="Click the element whose center becomes the path center. Esc to cancel.";
+            else if(rayPlacement.Placing()==Kind::Path)
+                text="Click an element on the surface for path point "+std::to_string(rayPlacement.Endpoint()+1)+
+                     (rayPlacement.Single()?". Esc to cancel.":". Finish below when done; Esc to cancel.");
+            else text=rayPlacement.Endpoint()==0?"Click the element where the ray starts (step 1 of 2). Drag to orbit; Esc to cancel.":
+                                                 "Click the element where the ray ends (step 2 of 2). Drag to orbit; Esc to cancel.";
+            banner(ICON_FA_CROSSHAIRS,text.c_str(),palette.accent);
+            if(!rayPlacement.Message().empty()) banner(ICON_FA_TRIANGLE_EXCLAMATION,rayPlacement.Message().c_str(),palette.warning);
+        }
         else if(rayPlacement.Current()==RayFEM::UI::RayPlacement::Step::PlacePoint)
             banner(ICON_FA_CROSSHAIRS,"Place the point on the element in the inset viewer, or click another element here.",palette.accent);
         if(pickingDof)

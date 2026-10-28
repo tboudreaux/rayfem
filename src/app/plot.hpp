@@ -27,6 +27,8 @@ struct PlotOptions {
     double* clicked_x = nullptr;
     // Optional output. Hovering inside the axes writes the domain coordinate.
     double* hovered_x = nullptr;
+    // Optional vertical markers (for example path control points), numbered from 1.
+    std::span<const double> markers{};
 };
 struct PlotRange {
     double x_min = 0, x_max = 1, y_min = 0, y_max = 1;
@@ -208,6 +210,17 @@ inline void PlotLines(const char* id, std::span<const PlotSeriesView> series,
             if(line.points.size()<=32 || isolated) draw->AddCircleFilled(current,2.5f,line.color);
             previous=current;previous_valid=true;
         }
+    }
+    for(std::size_t m=0;m<options.markers.size();++m) {
+        // The end of a path lands on x_max up to rounding; keep it.
+        const double slack=1e-9*std::max(1.0,range.x_max-range.x_min);
+        const double value=options.markers[m];
+        if(!std::isfinite(value) || value<range.x_min-slack || value>range.x_max+slack)continue;
+        const float x=low.x+static_cast<float>(PlotFraction(std::clamp(value,range.x_min,range.x_max),range.x_min,range.x_max))*width;
+        draw->AddLine({x,low.y},{x,high.y},WithAlpha(Palette().guide,90),1);
+        const std::string label=std::to_string(m+1);
+        const float label_width=ImGui::CalcTextSize(label.c_str()).x;
+        draw->AddText({x+3+label_width>high.x?x-3-label_width:x+3,low.y+2},Palette().guide_text,label.c_str());
     }
     if(std::isfinite(options.cursor_x) && options.cursor_x>=range.x_min && options.cursor_x<=range.x_max) {
         const float x=low.x+static_cast<float>(PlotFraction(options.cursor_x,range.x_min,range.x_max))*width;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
@@ -38,6 +39,19 @@ Position SphericalDirection(const Basis& basis,double theta,double phi) {
 }
 struct Patch { int element=-1,face=-1,boundary=-1,boundary_attribute=-1;mfem::Geometry::Type geometry; };
 struct Triangle { int patch;Position p[3];mfem::IntegrationPoint uv[3]; };
+struct Box { Position low,high; };
+// Slab test against a box; only hits at or ahead of the origin count.
+bool BoxHit(const Box& box,const Ray& ray) {
+    double near=0,far=std::numeric_limits<double>::infinity();
+    for(int d=0;d<3;++d) {
+        if(ray.direction[d]==0){if(ray.origin[d]<box.low[d]||ray.origin[d]>box.high[d])return false;continue;}
+        double a=(box.low[d]-ray.origin[d])/ray.direction[d],b=(box.high[d]-ray.origin[d])/ray.direction[d];
+        if(a>b)std::swap(a,b);
+        near=std::max(near,a);far=std::min(far,b);
+        if(near>far)return false;
+    }
+    return true;
+}
 
 // Always return an actual parent-element reference coordinate and position.
 // This also supports arbitrary scalar-basis spatial-vector displacement fields,
@@ -148,6 +162,7 @@ public:
            (exact_&&!rays.empty()&&patches.size()>100000/rays.size()))
             throw std::invalid_argument("Surface trace request is too large; reduce samples/refinement or hide materials (limits: 250000 triangles, 24 million ray/triangle checks, 100000 curved ray/face solves)");
         mfem::GeometryRefiner refiner;std::vector<Triangle> triangles;triangles.reserve(triangle_count);
+        std::vector<Box> boxes;boxes.reserve(patches.size());
         Position low{},high{};bool have_bounds=false;
         for(int index=0;index<int(patches.size());++index) {
             const auto& patch=patches[index];
@@ -160,6 +175,13 @@ public:
                 if(!have_bounds){low=high=positions.back();have_bounds=true;}
                 for(int d=0;d<3;++d){low[d]=std::min(low[d],positions.back()[d]);high[d]=std::max(high[d],positions.back()[d]);}
             }
+            // Pad the sampled hull so the seeding below still reaches a
+            // curved patch that bulges past its tessellation.
+            Box box{positions[0],positions[0]};
+            for(const auto& p:positions)for(int d=0;d<3;++d){box.low[d]=std::min(box.low[d],p[d]);box.high[d]=std::max(box.high[d],p[d]);}
+            const double pad=.25*Norm(Sub(box.high,box.low));
+            for(int d=0;d<3;++d){box.low[d]-=pad;box.high[d]+=pad;}
+            boxes.push_back(box);
             auto triangle=[&](int a,int b,int c) {triangles.push_back({index,{positions[a],positions[b],positions[c]},
                 {refined->RefPts.IntPoint(a),refined->RefPts.IntPoint(b),refined->RefPts.IntPoint(c)}});};
             const int stride=patch.geometry==mfem::Geometry::SQUARE?4:3;
@@ -200,7 +222,9 @@ public:
             // A coarse tessellation can miss a bulging curved patch. Center
             // seeds recover these exterior/tangent-near queries; failed solves
             // remain explicit gaps, never nearest-vertex substitutions.
-            if(exact_)for(int index=0;index<int(patches.size());++index)if(!seeded[index]) {
+            // Only patches whose padded box the ray crosses can be hit, which
+            // keeps the seeding proportional to the faces along each ray.
+            if(exact_)for(int index=0;index<int(patches.size());++index)if(!seeded[index]&&BoxHit(boxes[index],ray)) {
                 candidate(index,mfem::Geometries.GetCenter(patches[index].geometry));
                 // Curved folds can make the center Jacobian singular even
                 // when the ray intersects elsewhere. A bounded reference grid

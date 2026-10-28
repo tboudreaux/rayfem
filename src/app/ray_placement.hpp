@@ -56,8 +56,9 @@ struct ElementSurface {
     BoundingBox bounds{};
 };
 
+// exterior_only keeps only faces on the outer boundary of the mesh.
 inline ElementSurface BuildElementSurface(mfem::Mesh& mesh, int element, mfem::GridFunction* field,
-                                          const RenderOptions& options, int refinement) {
+                                          const RenderOptions& options, int refinement, bool exterior_only = false) {
     ElementSurface result;
     if (element < 0 || element >= mesh.GetNE()) throw std::out_of_range("Element is not in the displayed mesh");
     refinement = std::clamp(refinement, 2, 24);
@@ -99,7 +100,7 @@ inline ElementSurface BuildElementSurface(mfem::Mesh& mesh, int element, mfem::G
         for (int face : faces) {
             auto* tr = mesh.GetFaceElementTransformations(face, mfem::FaceElementTransformations::HAVE_LOC1 |
                                                                 mfem::FaceElementTransformations::HAVE_LOC2);
-            if (!tr) continue;
+            if (!tr || (exterior_only && mesh.GetFaceInformation(face).IsInterior())) continue;
             mfem::IntegrationPointTransformation* loc = tr->Elem1No == element ? &tr->Loc1 :
                 (tr->Elem2No == element ? &tr->Loc2 : nullptr);
             if (!loc) continue;
@@ -169,54 +170,88 @@ inline std::optional<RayAnchor> PickElementSurface(const ElementSurface& surface
 // endpoint on that element's surface in an inset viewer. Start, then end.
 class RayPlacement {
 public:
+    // Ray: a start and an end on any element face. Path: any number of points
+    // on outer faces. Center: one click, the element's center.
+    enum class Kind { Ray, Path, Center };
     enum class Step { Idle, ChooseElement, PlacePoint };
+    // A path reports each confirmed point (partial) so it can be traced while
+    // placing; cancelled asks the owner to restore the path it had before.
+    struct Result { Kind kind = Kind::Ray; std::vector<RayAnchor> anchors; int edited = -1; bool partial = false, cancelled = false; };
     using ColorFor = std::function<Color(double)>;
     // Draws the rest of the mesh faintly with the inset camera, for orientation.
     using DrawContext = std::function<void(const Camera3D&, Vector2 viewport)>;
 
     Step Current() const { return step; }
+    Kind Placing() const { return kind; }
     bool Active() const { return step != Step::Idle; }
     // The main view's element clicks go here while placing.
     bool WantsElement() const { return Active(); }
     int Endpoint() const { return endpoint; }
-    const RayAnchor& Anchor(int which) const { return anchors[which]; }
+    bool Single() const { return single; }
+    const std::string& Message() const { return message; }
 
-    void Begin() { Close(); anchors = {}; endpoint = 0; single = false; step = Step::ChooseElement; }
-    // Re-place one endpoint, opening its element directly.
-    void Edit(int which, const std::array<RayAnchor, 2>& current) {
-        Close(); anchors = current; endpoint = which; single = true;
+    void Begin(Kind what = Kind::Ray) {
+        Close(); kind = what; anchors.assign(what == Kind::Ray ? 2 : 0, RayAnchor{});
+        endpoint = 0; single = false; message.clear(); step = Step::ChooseElement;
+    }
+    // Re-place one point, opening its element directly. A point index past the
+    // end appends a new point.
+    void Edit(Kind what, int which, const std::vector<RayAnchor>& current) {
+        Close(); kind = what; anchors = current; endpoint = which; single = true; message.clear();
+        if (which >= int(anchors.size())) anchors.resize(which + 1);
         step = Step::ChooseElement;
         if (anchors[which].Valid()) { pending = anchors[which]; requestedElement = anchors[which].element; }
     }
+    void Edit(int which, const std::array<RayAnchor, 2>& current) { Edit(Kind::Ray, which, {current.begin(), current.end()}); }
     void Cancel() { Close(); step = Step::Idle; }
+    // Cancel from the user. A new path was traced while placing, so its owner
+    // is told to restore the previous one; single edits changed nothing yet.
+    std::optional<Result> CancelPlacement() {
+        const bool restore = Active() && kind == Kind::Path && !single;
+        Cancel();
+        if (!restore) return std::nullopt;
+        Result result{kind, {}, -1}; result.cancelled = true;
+        return result;
+    }
     // An element is opened on the next Draw, which has the frame and colors.
-    void ChooseElement(int element) { requestedElement = element; pending.reset(); }
+    void ChooseElement(int element) { requestedElement = element; pending.reset(); message.clear(); }
 
     // Main view overlay rectangle this window covers, for input routing.
     bool Covers(Vector2 mouse) const {
-        return step == Step::PlacePoint && mouse.x >= windowMin.x && mouse.y >= windowMin.y && mouse.x < windowMax.x && mouse.y < windowMax.y;
+        return Active() && mouse.x >= windowMin.x && mouse.y >= windowMin.y && mouse.x < windowMax.x && mouse.y < windowMax.y;
     }
 
-    // Draws the inset window when an element is open. Returns both anchors
-    // once placement is complete. Main thread, between ImGui frames' windows.
-    std::optional<std::array<RayAnchor, 2>> Draw(const std::shared_ptr<RenderFrame>& frame, mfem::GridFunction* field,
-                                                 const RenderOptions& options, int refinement, ImVec2 viewportMin, ImVec2 viewportSize,
-                                                 const Shader& shader, const ColorFor& color, const Camera3D& mainCamera,
-                                                 const DrawContext& context = {}) {
+    // Draws the inset window when an element is open (and the path toolbar
+    // while choosing path points). Returns the anchors once placement ends.
+    std::optional<Result> Draw(const std::shared_ptr<RenderFrame>& frame, mfem::GridFunction* field,
+                               const RenderOptions& options, int refinement, ImVec2 viewportMin, ImVec2 viewportSize,
+                               const Shader& shader, const ColorFor& color, const Camera3D& mainCamera,
+                               const DrawContext& context = {}) {
         if (!Active()) return std::nullopt;
         viewDirection = Vector3Subtract(mainCamera.target, mainCamera.position);
         viewUp = mainCamera.up;
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) { Cancel(); return std::nullopt; }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) return CancelPlacement();
         if (requestedElement >= 0 && frame && frame->mesh) {
-            Open(*frame, requestedElement, field, options, refinement, shader, color);
+            const int chosen = requestedElement;
             requestedElement = -1;
+            if (kind == Kind::Center) {
+                if (chosen < frame->mesh->GetNE()) {
+                    RayAnchor center{chosen, mfem::Geometries.GetCenter(frame->mesh->GetElementBaseGeometry(chosen))};
+                    Close(); step = Step::Idle;
+                    return Result{kind, {center}, 0};
+                }
+            } else Open(*frame, chosen, field, options, refinement, shader, color);
         }
-        if (step != Step::PlacePoint) { windowMin = windowMax = {}; return std::nullopt; }
+        if (step == Step::ChooseElement) {
+            if (kind == Kind::Path && !single) return DrawPathToolbar(viewportMin, viewportSize);
+            windowMin = windowMax = {};
+            return std::nullopt;
+        }
         // Keep the geometry current while frames stream or the mesh deforms.
         if (frame && frame.get() != openedFrameRaw && frame->mesh == openedMesh) Rebuild(*frame, field, options, refinement, shader, color);
 
         const auto& palette = Palette();
-        // The window keeps its size and place between the start and end steps.
+        // The window keeps its size and place between steps.
         if (windowSize.x <= 0) {
             windowSize = {std::min(440.0f, viewportSize.x*.45f), std::min(500.0f, viewportSize.y - 24)};
             windowPosition = {viewportMin.x + viewportSize.x - windowSize.x - 12, viewportMin.y + 12};
@@ -236,8 +271,9 @@ public:
             ImGui::SetNextWindowSize(windowSize, ImGuiCond_Appearing);
         }
         ImGui::SetNextWindowSizeConstraints({300, 320}, {std::max(300.0f, viewportSize.x), std::max(320.0f, viewportSize.y)});
-        const std::string title = std::string(endpoint == 0 ? "Ray start" : "Ray end") + "  ·  element " + std::to_string(element) + "###ray placement";
-        std::optional<std::array<RayAnchor, 2>> result;
+        const std::string what = kind == Kind::Ray ? (endpoint == 0 ? "Ray start" : "Ray end") : "Path point " + std::to_string(endpoint + 1);
+        const std::string title = what + "  ·  element " + std::to_string(element) + "###ray placement";
+        std::optional<Result> result;
         bool open = true;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, OverlayRounding);
         // A visible grip: the theme's default blends into the window border.
@@ -254,8 +290,11 @@ public:
             const char* expandLabel = expanded ? ICON_FA_DOWN_LEFT_AND_UP_RIGHT_TO_CENTER "###expand" : ICON_FA_UP_RIGHT_AND_DOWN_LEFT_FROM_CENTER "###expand";
             const float expandWidth = ImGui::GetFrameHeight();
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - expandWidth - ImGui::GetStyle().ItemSpacing.x);
-            ImGui::TextDisabled("Click the surface to place the %s. Drag to orbit, scroll to zoom. The faint lines are the rest of the mesh.",
-                                endpoint == 0 ? "start" : "end");
+            if (kind == Kind::Path)
+                ImGui::TextDisabled("Click an outer face to place point %d. Drag to orbit, scroll to zoom. The faint lines are the rest of the mesh.", endpoint + 1);
+            else
+                ImGui::TextDisabled("Click the surface to place the %s. Drag to orbit, scroll to zoom. The faint lines are the rest of the mesh.",
+                                    endpoint == 0 ? "start" : "end");
             ImGui::PopTextWrapPos();
             ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - expandWidth);
             if (ImGui::Button(expandLabel, {expandWidth, 0})) resize = true;
@@ -266,7 +305,7 @@ public:
             if (pending) {
                 ImGui::Text("Position %.5g, %.5g, %.5g", pendingPosition.x, pendingPosition.y, pendingPosition.z);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-                    ImGui::SetTooltip("Reference coordinates %.4f, %.4f, %.4f in element %d.\nThe endpoint stays at this material point as the mesh moves.",
+                    ImGui::SetTooltip("Reference coordinates %.4f, %.4f, %.4f in element %d.\nThe point stays at this material point as the mesh moves.",
                                       pending->point.x, pending->point.y, pending->point.z, element);
             } else ImGui::TextDisabled("No point placed yet");
             const float third = (ImGui::GetContentRegionAvail().x - 2*ImGui::GetStyle().ItemSpacing.x)/3;
@@ -279,34 +318,77 @@ public:
             ImGui::SameLine();
             if (ImGui::Button("Cancel", {third, 0})) open = false;
             if (confirm && pending) {
-                anchors[endpoint] = *pending;
+                if (endpoint < int(anchors.size())) anchors[endpoint] = *pending; else anchors.push_back(*pending);
+                const int placed = endpoint;
                 Close();
-                if (!single && endpoint == 0) { endpoint = 1; step = Step::ChooseElement; }
-                else { step = Step::Idle; result = anchors; }
+                if (single) { step = Step::Idle; result = Result{kind, anchors, placed}; }
+                else if (kind == Kind::Ray && endpoint == 0) { endpoint = 1; step = Step::ChooseElement; }
+                else if (kind == Kind::Ray) { step = Step::Idle; result = Result{kind, anchors, -1}; }
+                else { endpoint = int(anchors.size()); step = Step::ChooseElement; result = Result{kind, anchors, placed, true}; }
             }
         }
         ImGui::End();
-        if (!open) Cancel();
+        if (!open) return CancelPlacement();
         return result;
     }
 
     // Marks already-placed endpoints in the main view.
     template<class Project> void DrawMainMarkers(ImDrawList* draw, mfem::Mesh& mesh, const RenderOptions& options, Project&& project) const {
-        if (!Active()) return;
-        for (int i = 0; i < 2; ++i) {
-            if (!anchors[i].Valid() || i == endpoint) continue;
+        if (!Active() || kind == Kind::Path) return;
+        ImVec2 previous{};
+        bool hasPrevious = false;
+        for (int i = 0; i < int(anchors.size()); ++i) {
+            if (!anchors[i].Valid() || i == endpoint) { hasPrevious = false; continue; }
             const auto position = AnchorPosition(mesh, anchors[i], options);
             ImVec2 screen;
-            if (!position || !project(*position, screen)) continue;
+            if (!position || !project(*position, screen)) { hasPrevious = false; continue; }
             draw->AddCircleFilled(screen, 6, Palette().guide);
             draw->AddCircle(screen, 9, Palette().handle_outline, 0, 2);
-            draw->AddText({screen.x + 12, screen.y - 8}, Palette().guide_text, i == 0 ? "Start" : "End");
+            const std::string label = kind == Kind::Ray ? (i == 0 ? "Start" : "End") : std::to_string(i + 1);
+            draw->AddText({screen.x + 12, screen.y - 8}, Palette().guide_text, label.c_str());
+            previous = screen; hasPrevious = true;
         }
     }
 
     void Shutdown() { Close(); }
 
 private:
+    // While choosing path points: count, Undo, Finish and Cancel.
+    std::optional<Result> DrawPathToolbar(ImVec2 viewportMin, ImVec2 viewportSize) {
+        std::optional<Result> result;
+        bool cancel = false;
+        const auto& style = ImGui::GetStyle();
+        ImGui::SetNextWindowPos({viewportMin.x + viewportSize.x*.5f, viewportMin.y + viewportSize.y - 16}, ImGuiCond_Always, {.5f, 1});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, OverlayRounding);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {12, 10});
+        if (ImGui::Begin("##path toolbar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing)) {
+            windowMin = {ImGui::GetWindowPos().x, ImGui::GetWindowPos().y};
+            windowMax = {windowMin.x + ImGui::GetWindowSize().x, windowMin.y + ImGui::GetWindowSize().y};
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("Path  ·  %zu point%s", anchors.size(), anchors.size() == 1 ? "" : "s");
+            ImGui::SameLine(0, style.ItemSpacing.x*2);
+            ImGui::BeginDisabled(anchors.empty());
+            if (ImGui::Button(ICON_FA_ROTATE_LEFT " Undo")) { anchors.pop_back(); endpoint = int(anchors.size()); result = Result{kind, anchors, -1, true}; }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::BeginDisabled(anchors.size() < 2);
+            const bool finish = ToggleButton(ICON_FA_CHECK " Finish", anchors.size() >= 2) ||
+                                (anchors.size() >= 2 && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Finish the path (Enter). Place at least two points.");
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) cancel = true;
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Discard these points and keep the previous path (Esc).");
+            if (finish && anchors.size() >= 2) { step = Step::Idle; result = Result{kind, anchors, -1}; windowMin = windowMax = {}; }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        if (cancel) return CancelPlacement();
+        return result;
+    }
+
     void Close() {
         if (model.meshCount) UnloadModel(model);
         model = {};
@@ -326,7 +408,12 @@ private:
         if (pending && pending->element != element) pending.reset();
         try {
             Build(frame, field, options, refinement, shader, color);
-        } catch (const std::exception&) { Close(); step = Step::ChooseElement; return; }
+        } catch (const std::exception& e) { Close(); step = Step::ChooseElement; message = e.what(); return; }
+        if (surface.triangles.empty()) {
+            Close(); step = Step::ChooseElement;
+            message = "Element " + std::to_string(chosen) + " has no outer face. Choose an element on the surface.";
+            return;
+        }
         const Vector3 center = Vector3Scale(Vector3Add(surface.bounds.min, surface.bounds.max), .5f);
         radius = std::max(1e-6f, Vector3Length(Vector3Subtract(surface.bounds.max, surface.bounds.min))*.5f);
         // Start from the main view's direction so the element appears as it does there.
@@ -344,7 +431,7 @@ private:
                const Shader& shader, const ColorFor& color) {
         auto settings = options;
         settings.element_explosion = 0;
-        surface = BuildElementSurface(*frame.mesh, element, field, settings, refinement);
+        surface = BuildElementSurface(*frame.mesh, element, field, settings, refinement, kind == Kind::Path);
         SurfaceData data;
         for (const auto& t : surface.triangles) {
             const Vector3 a = surface.positions[t[0]], b = surface.positions[t[1]], c = surface.positions[t[2]];
@@ -419,7 +506,9 @@ private:
     Step step = Step::Idle;
     int endpoint = 0, element = -1, requestedElement = -1;
     bool single = false, pressing = false, pressMoved = false;
-    std::array<RayAnchor, 2> anchors{};
+    Kind kind = Kind::Ray;
+    std::vector<RayAnchor> anchors;
+    std::string message;
     std::optional<RayAnchor> pending;
     Vector3 pendingPosition{};
     Vector2 pressPosition{}, windowMin{}, windowMax{};
