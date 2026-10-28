@@ -38,6 +38,7 @@
 #include "surface_trace_panel.hpp"
 #include "flow_panel.hpp"
 #include "edge_renderer.hpp"
+#include "dof_renderer.hpp"
 #include "element_picker.hpp"
 #include "element_panel.hpp"
 #include "mouse_modifiers.hpp"
@@ -104,6 +105,9 @@ struct ViewCache {
     Model model{};
     Model edgeModel{};
     Model selectionModel{};
+    Model dofModel{};
+    std::string dofTracks;
+    bool dofsUploaded = false;
     RayFEM::UI::ElementPicker picker;
     std::uint64_t selectionRevision=UINT64_MAX;
     std::size_t selectionVertices=0;
@@ -153,6 +157,7 @@ public:
         SetWindowMinSize(960, 640);
         SetTargetFPS(opts.fps);
         elementExplosion=opts.explosion;
+        flow.SetWorker(&pipeline);
         rlImGuiSetup(true);
         ImGui::GetIO().IniFilename = nullptr;
         ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -176,6 +181,7 @@ public:
         rotationIcons=RayFEM::UI::LoadRotationIcons();
         shader = LoadShaderFromMemory(sliceVertex, sliceFragment);
         edgeRenderer.Initialize();
+        dofRenderer.Initialize();
         streamlineRenderer.Initialize();
         normalLoc = GetShaderLocation(shader, "planeNormal");
         pointLoc = GetShaderLocation(shader, "planePoint");
@@ -194,6 +200,7 @@ public:
         flow.ClearGraphics();
         streamlineRenderer.Shutdown();
         edgeRenderer.Shutdown();
+        dofRenderer.Shutdown();
         ranges.clear();
         if (target.id) UnloadRenderTexture(target);
         UnloadShader(shader);
@@ -257,6 +264,7 @@ private:
         tracking = TrackingPanel{};
         surfaceTrace = SurfaceTracePanel{};
         flow = FlowPanel{};
+        flow.SetWorker(&pipeline);
         elements = ElementPanel{};
         frames.assign(loaded.frames.begin(), loaded.frames.end());
         archivePath = path.string();
@@ -380,6 +388,7 @@ private:
         UnloadModel(entry.model);
         UnloadModel(entry.edgeModel);
         UnloadModel(entry.selectionModel);
+        UnloadModel(entry.dofModel);
     }
 
     void ClearCache() {
@@ -481,6 +490,7 @@ private:
         entry.vertices=data.positions.size()/3;
         entry.boundaries=std::move(result.boundaries); entry.boundaries_ready=result.boundaries_ready;
         entry.retainedElements=std::move(result.retained);
+        entry.dofs=std::move(result.dofs); entry.dofs_ready=result.dofs_ready;
         if(!data.positions.empty()) {
             entry.model=RayFEM::UploadSurface(data);
             entry.picker=std::move(result.picker);
@@ -550,6 +560,7 @@ private:
             request.cut_algorithm=static_cast<RayFEM::CutAlgorithm>(cutAlgorithm);
             request.automatic_range=automaticColorRange; request.minimum=colorMinimum; request.maximum=colorMaximum;
             request.boundaries=showBoundaries;
+            request.dofs=showDofs;
             pipeline.Request(std::move(request));
             requestedKey=key;
         }
@@ -1237,6 +1248,7 @@ private:
             const RayFEM::ClipPlane flowPlane{slicePoint,sliceNormal};
             flow.Draw(camera,GetTime(),streamlineRenderer,{float(width),float(height)},active->retainedElements.empty()?nullptr:&active->retainedElements,
                       clip && clipMode==0?&flowPlane:nullptr);
+            if (showDofs) DrawDofMarkers(*active,{float(width),float(height)});
         }
         if (planeGuide) DrawPlaneGuide();
         profiles.DrawGuide();
@@ -1476,7 +1488,9 @@ private:
         } catch(const std::exception& e){error=e.what();active.boundaries_ready=true;}
     }
 
-    void DrawDofs(ViewCache& active,ImVec2 origin,ImVec2 size,bool hovered) {
+    static std::size_t DofStride(const ViewCache& active) {return std::max<size_t>(1,(active.dofs.size()+19999)/20000);}
+
+    void EnsureDofs(ViewCache& active) {
         try {
             if (!active.dofs_ready) {
                 if (auto* gf=Field(active.frame)) active.dofs=RayFEM::SampleDofs(*active.frame->mesh,*gf,RenderSettings(active.frame),20000,active.retainedElements.empty()?nullptr:&active.retainedElements);
@@ -1484,25 +1498,51 @@ private:
                 TrimViewCache();
             }
         } catch (const std::exception& e) {error=e.what();active.dofs_ready=true;}
-        auto* draw=ImGui::GetWindowDrawList();
-        draw->PushClipRect(origin,{origin.x+size.x,origin.y+size.y},true);
+    }
+
+    // GPU markers inside the 3D pass; rebuilt only for new DOFs or tracks.
+    void DrawDofMarkers(ViewCache& active,Vector2 viewport) {
+        EnsureDofs(active);
+        const auto colors=tracking.DofColors(*active.frame,fieldName);
+        std::vector<std::pair<int,ImU32>> sorted(colors.begin(),colors.end());
+        std::sort(sorted.begin(),sorted.end());
+        std::string tracks;
+        for(const auto& [dof,color]:sorted) tracks+=std::to_string(dof)+':'+std::to_string(color)+';';
+        if(!active.dofsUploaded || active.dofTracks!=tracks) {
+            UnloadModel(active.dofModel);active.dofModel={};
+            try {active.dofModel=dofRenderer.Upload(active.dofs,DofStride(active),colors);}
+            catch(const std::exception& e) {error=e.what();}
+            active.dofsUploaded=true;active.dofTracks=tracks;
+        }
+        const auto toColor=[](ImU32 c){return Color{static_cast<unsigned char>(c&0xff),static_cast<unsigned char>((c>>8)&0xff),
+                                                     static_cast<unsigned char>((c>>16)&0xff),static_cast<unsigned char>((c>>24)&0xff)};};
+        const RayFEM::ClipPlane plane{slicePoint,sliceNormal};
+        dofRenderer.Draw(active.dofModel,viewport,toColor(RayFEM::UI::Palette().dof),toColor(RayFEM::UI::Palette().dof_ring),
+                         clip && clipMode==0?&plane:nullptr);
+    }
+
+    // Hover details and picking. Markers themselves are drawn on the GPU.
+    void DrawDofs(ViewCache& active,ImVec2 origin,ImVec2 size,bool hovered) {
+        EnsureDofs(active);
+        if (!hovered) return;
         const RayFEM::DofPoint* nearest=nullptr;
         float distance=81;
         auto mouse=ImGui::GetMousePos();
-        size_t stride=std::max<size_t>(1,(active.dofs.size()+19999)/20000);
+        const size_t stride=DofStride(active);
+        // One view-projection for every marker, as GetWorldToScreenEx builds per point.
+        const int width=target.texture.width,height=target.texture.height;
+        const Matrix viewProjection=MatrixMultiply(MatrixLookAt(camera.position,camera.target,camera.up),
+            MatrixPerspective(camera.fovy*DEG2RAD,double(width)/double(height),rlGetCullDistanceNear(),rlGetCullDistanceFar()));
+        const Vector3 forward=Vector3Subtract(camera.target,camera.position);
         for (size_t i=0;i<active.dofs.size();i+=stride) {
             const auto& point=active.dofs[i];
-            if (Vector3DotProduct(Vector3Subtract(point.position,camera.position),Vector3Subtract(camera.target,camera.position))<=0) continue;
+            if (Vector3DotProduct(Vector3Subtract(point.position,camera.position),forward)<=0) continue;
             if (clip && clipMode==0 && Vector3DotProduct(Vector3Subtract(point.position,slicePoint),sliceNormal)>0) continue;
-            Vector2 p=GetWorldToScreenEx(point.position,camera,target.texture.width,target.texture.height);
-            ImVec2 screen={origin.x+p.x,origin.y+p.y};
-            const ImU32 trackColor=tracking.DofColor(*active.frame,fieldName,point.index);
-            draw->AddCircleFilled(screen,trackColor?5:3,trackColor?trackColor:RayFEM::UI::Palette().dof);
-            if(trackColor) draw->AddCircle(screen,7,RayFEM::UI::Palette().dof_ring,0,1.5f);
+            const Quaternion clipSpace=QuaternionTransform({point.position.x,point.position.y,point.position.z,1},viewProjection);
+            const ImVec2 screen={origin.x+(clipSpace.x/clipSpace.w+1)*.5f*width,origin.y+(1-clipSpace.y/clipSpace.w)*.5f*height};
             float d=(screen.x-mouse.x)*(screen.x-mouse.x)+(screen.y-mouse.y)*(screen.y-mouse.y);
-            if (hovered && d<distance) {distance=d;nearest=&point;}
+            if (d<distance) {distance=d;nearest=&point;}
         }
-        draw->PopClipRect();
         if (nearest) {
             ImGui::BeginTooltip();
             ImGui::Text("DOF %d | element %d",nearest->index,nearest->element);
@@ -1583,6 +1623,7 @@ private:
     RenderTexture2D target{};
     Shader shader{};
     RayFEM::UI::EdgeRenderer edgeRenderer;
+    RayFEM::UI::DofRenderer dofRenderer;
     RayFEM::UI::StreamlineRenderer streamlineRenderer;
     int normalLoc,pointLoc,enabledLoc,depthBiasLoc;
     Vector3 sliceNormal={1,0,0},slicePoint={0,0,0};

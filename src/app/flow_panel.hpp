@@ -8,6 +8,7 @@
 #include "raymath.h"
 #include "rlgl.h"
 #include "streamline_renderer.hpp"
+#include "frame_pipeline.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -19,8 +20,10 @@
 #include <sstream>
 #include <string>
 
-// CPU sampling snapshots; MFEM work stays on the caller/UI thread. The cache holds
-// weak frame/mesh references, so old flow previews never retain frame history.
+// CPU sampling snapshots. With a worker (SetWorker), sampling runs there on each
+// frame's compute twin and the newest snapshot is shown when it arrives;
+// without one it runs inline on the caller's thread. The cache holds weak
+// frame/mesh references, so old flow previews never retain frame history.
 // Draw must run inside BeginMode3D, with the usual depth test/write state.
 class FlowPanel {
     using Clock=std::chrono::steady_clock;
@@ -49,7 +52,30 @@ class FlowPanel {
         Model model{};
         ~PathDrawing(){UnloadModel(model);}
     };
+    // Everything one sampling run needs, captured by value for the worker.
+    struct BuildInput {
+        std::weak_ptr<RayFEM::RenderFrame> viewer;
+        std::weak_ptr<mfem::Mesh> viewerMesh;
+        std::shared_ptr<RayFEM::RenderFrame> eval;  // compute twin, or the viewer frame inline
+        mfem::GridFunction* inlineField=nullptr;    // inline only: the caller's field
+        std::string field,key;
+        RayFEM::RenderOptions settings;
+        RayFEM::FlowOptions flow;
+        std::vector<bool> retained;
+        int mode=0,arrowCount=0,pathSeeds=0;
+        bool detailed=false;
+        std::uint32_t index=0;
+    };
+    struct Outcome {std::shared_ptr<Snapshot> snapshot;std::string error,key;std::weak_ptr<RayFEM::RenderFrame> frame;};
+    // Shared with running jobs, so a reset panel cannot leave them dangling.
+    struct Shared {
+        std::mutex mutex;
+        std::vector<Outcome> outcomes;         // worker -> UI
+        std::deque<std::shared_ptr<MagnitudeRange>> ranges;  // used by whichever thread samples
+    };
 public:
+    // Run sampling on this worker from now on (UI thread, before drawing).
+    void SetWorker(RayFEM::UI::FramePipeline* pipeline) {worker=pipeline;}
     bool Enabled() const {return mode!=0;}
     void Open() {if(!mode)mode=1;}
     void SetMode(int value) {mode=std::clamp(value,0,3);}
@@ -160,9 +186,11 @@ public:
         if(!currentRequest && !forceUpdate) {
             for(const auto& item:cache)if(item->frame.lock()==context && item->key==key){current=item;currentRequest=true;message=current->message;break;}
         }
+        Collect();
+        currentRequest=current && current->frame.lock()==context && current->key==key;
         const auto now=Clock::now();
         const bool failedHere=failedFrame.lock()==context && failedKey==key;
-        if(forceUpdate || (automatic && !currentRequest && !failedHere && now-lastAttempt>=std::chrono::milliseconds(250)))Build(key,forceUpdate);
+        if(forceUpdate || (automatic && !currentRequest && !inFlight && !failedHere && now-lastAttempt>=std::chrono::milliseconds(250)))Build(key,forceUpdate);
         if(!current || current->mesh.lock()!=context->mesh || current->field!=fieldName)return;
         // Endpoint filtering alone is insufficient: an old segment can cross
         // a newly hidden thin cell while both endpoints lie in retained cells.
@@ -295,8 +323,10 @@ private:
         key<<";mask="<<retained.size()<<','<<hash;
         return key.str();
     }
-    std::shared_ptr<MagnitudeRange> RangeFor(const std::shared_ptr<RayFEM::RenderFrame>& frame,
-                                           mfem::GridFunction& field,const std::string& name) {
+    static std::shared_ptr<MagnitudeRange> RangeFor(std::deque<std::shared_ptr<MagnitudeRange>>& ranges,
+                                                  const RayFEM::RenderOptions& settings,
+                                                  const std::shared_ptr<RayFEM::RenderFrame>& frame,
+                                                  mfem::GridFunction& field,const std::string& name) {
         // Colors always describe every included parent element. Sampling and
         // camera controls, clipping, deformation, and palettes do not enter
         // this cache key and cannot trigger another finite-element evaluation.
@@ -335,7 +365,9 @@ private:
                 colorError="Update flow to refresh this frame.";
                 return;
             }
-            current->magnitudeRange=RangeFor(frame,*field,current->field);
+            // The worker computes ranges with each snapshot; MFEM is not used here.
+            if(worker)return;
+            current->magnitudeRange=RangeFor(shared->ranges,settings,frame,*field,current->field);
         }
         const auto& source=current->magnitudeRange;
         const auto& options=settings.color_scale;
@@ -349,28 +381,74 @@ private:
     }
     void Build(const std::string& key,bool detailed) {
         forceUpdate=false;lastAttempt=Clock::now();
-        const auto start=lastAttempt;
-        const auto duration=std::chrono::milliseconds(detailed?800:24);
+        BuildInput input;
+        input.viewer=context;input.viewerMesh=context->mesh;
+        input.eval=worker?context->compute:context;
+        if(!worker)input.inlineField=fieldPointer;
+        input.field=fieldName;input.key=key;input.settings=settings;
+        input.retained=retained;input.mode=mode;input.arrowCount=arrowCount;input.pathSeeds=pathSeeds;
+        input.detailed=detailed;input.index=context->metadata.frame_index;
+        auto& flow=input.flow;flow.clip_plane=plane;flow.retained_elements=retained;
+        flow.max_points=detailed?128000:12000;flow.max_steps=detailed?320:160;flow.step_size=stepLength;flow.max_length=pathLength;
+        flow.bidirectional=bidirectional;flow.integrator=integrator==0?RayFEM::FlowIntegrator::RK2:RayFEM::FlowIntegrator::RK4;
+        flow.max_evaluations=detailed?600000:36000;flow.max_location_tests=detailed?1500000:120000;
+        if(!input.eval) {message="Frame has no compute copy";failedKey=key;failedFrame=context;return;}
+        if(!worker) {shared->outcomes.push_back(Run(std::move(input),shared->ranges));Collect();return;}
+        inFlight=true;
+        worker->Submit("flow",[input=std::move(input),state=shared]() mutable {
+            auto outcome=Run(std::move(input),state->ranges);
+            std::lock_guard lock(state->mutex);
+            state->outcomes.push_back(std::move(outcome));
+        });
+    }
+    // Install finished runs. The newest one becomes current, as with inline sampling.
+    void Collect() {
+        std::vector<Outcome> outcomes;
+        {std::lock_guard lock(shared->mutex);outcomes.swap(shared->outcomes);}
+        for(auto& outcome:outcomes) {
+            inFlight=false;
+            if(!outcome.snapshot) {
+                message=outcome.error;failedKey=outcome.key;failedFrame=outcome.frame;currentRequest=false;
+                continue;
+            }
+            auto result=std::move(outcome.snapshot);
+            std::erase_if(cache,[&](const auto& item){return item->frame.lock()==result->frame.lock() && item->key==result->key;});
+            cache.push_back(result);while(cache.size()>2)cache.pop_front();
+            current=std::move(result);message=current->message;failedKey.clear();failedFrame.reset();
+        }
+    }
+    // Sampling itself. Touches only input.eval and the given range cache.
+    static Outcome Run(BuildInput input,std::deque<std::shared_ptr<MagnitudeRange>>& ranges) {
+        Outcome outcome;outcome.key=input.key;outcome.frame=input.viewer;
+        const auto start=Clock::now();
+        const auto duration=std::chrono::milliseconds(input.detailed?800:24);
         const auto deadline=start+duration;
         try {
-            auto result=std::make_shared<Snapshot>();result->frame=context;result->mesh=context->mesh;
-            result->excludedMaterials=settings.excluded_materials;result->excludedElements=settings.excluded_elements;
-            result->retainedElements=retained;
-            result->field=fieldName;result->key=key;result->index=context->metadata.frame_index;
-            const bool pathsSupported=context->mesh->Dimension()==context->mesh->SpaceDimension();
-            RayFEM::FlowOptions flow;flow.clip_plane=plane;flow.retained_elements=retained;
-            flow.max_points=detailed?128000:12000;flow.max_steps=detailed?320:160;flow.step_size=stepLength;flow.max_length=pathLength;
-            flow.bidirectional=bidirectional;flow.integrator=integrator==0?RayFEM::FlowIntegrator::RK2:RayFEM::FlowIntegrator::RK4;
-            flow.max_evaluations=detailed?600000:36000;flow.max_location_tests=detailed?1500000:120000;
-            if(mode==1 || mode==3) {
-                const auto arrowDeadline=mode==3&&pathsSupported?start+duration/3:deadline;
-                flow.cancelled=[arrowDeadline]{return Clock::now()>=arrowDeadline;};
-                flow.max_seeds=flow.seed_count=arrowCount;
-                result->arrows=RayFEM::SampleVectorField(*context->mesh,*fieldPointer,settings,flow);
+            auto& frame=*input.eval;
+            // Inline runs use the caller's field and displacement unchanged; the
+            // worker resolves both on the compute twin.
+            mfem::GridFunction* field=input.inlineField;
+            auto settings=input.settings;
+            if(!field) {
+                for(const auto& item:frame.fields)if(item.name==input.field){field=item.gf.get();break;}
+                if(!field)throw std::runtime_error("The flow field is not in this frame");
+                settings.displacement=settings.displacement&&frame.displacement?frame.displacement.get():nullptr;
             }
-            if(mode>=2 && pathsSupported) {
-                flow.cancelled=[deadline]{return Clock::now()>=deadline;};flow.max_seeds=flow.seed_count=pathSeeds;
-                result->paths=RayFEM::BuildStreamlines(*context->mesh,*fieldPointer,settings,flow);
+            auto result=std::make_shared<Snapshot>();result->frame=input.viewer;result->mesh=input.viewerMesh;
+            result->excludedMaterials=settings.excluded_materials;result->excludedElements=settings.excluded_elements;
+            result->retainedElements=input.retained;
+            result->field=input.field;result->key=input.key;result->index=input.index;
+            const bool pathsSupported=frame.mesh->Dimension()==frame.mesh->SpaceDimension();
+            auto& flow=input.flow;
+            if(input.mode==1 || input.mode==3) {
+                const auto arrowDeadline=input.mode==3&&pathsSupported?start+duration/3:deadline;
+                flow.cancelled=[arrowDeadline]{return Clock::now()>=arrowDeadline;};
+                flow.max_seeds=flow.seed_count=input.arrowCount;
+                result->arrows=RayFEM::SampleVectorField(*frame.mesh,*field,settings,flow);
+            }
+            if(input.mode>=2 && pathsSupported) {
+                flow.cancelled=[deadline]{return Clock::now()>=deadline;};flow.max_seeds=flow.seed_count=input.pathSeeds;
+                result->paths=RayFEM::BuildStreamlines(*frame.mesh,*field,settings,flow);
             }
             const bool sampledZero=!result->arrows.points.empty() && std::none_of(result->arrows.points.begin(),result->arrows.points.end(),[](const auto& point){return point.magnitude>0;});
             std::erase_if(result->arrows.points,[](const auto& point){return !(point.magnitude>0);});
@@ -381,20 +459,18 @@ private:
                     if(j)distances[j]=distances[j-1]+Distance(line.points[j-1].position,line.points[j].position);
                 }
             }
-            result->magnitudeRange=RangeFor(context,*fieldPointer,fieldName);
+            result->magnitudeRange=RangeFor(ranges,settings,input.eval,*field,input.field);
             result->milliseconds=std::chrono::duration<double,std::milli>(Clock::now()-start).count();
-            std::erase_if(cache,[&](const auto& item){return item->frame.lock()==context && item->key==key;});
-            cache.push_back(result);while(cache.size()>2)cache.pop_front();
-            current=std::move(result);currentRequest=true;message.clear();failedKey.clear();failedFrame.reset();
-            if(mode>=2 && !pathsSupported) {
-                message=mode==3?"Showing arrows. Streamlines on surface meshes are not available.":"Streamlines on surface meshes are not available. Choose Arrows to inspect this field.";
-            } else if(current->arrows.points.empty()&&current->paths.lines.empty()) {
-                if(current->limited)message="Preview stopped before finding flow samples. Update flow for more detail.";
-                else if(sampledZero)message="The vector field is zero at the sampled positions.";
-                else message="No flow samples in the selected region.";
+            if(input.mode>=2 && !pathsSupported) {
+                result->message=input.mode==3?"Showing arrows. Streamlines on surface meshes are not available.":"Streamlines on surface meshes are not available. Choose Arrows to inspect this field.";
+            } else if(result->arrows.points.empty()&&result->paths.lines.empty()) {
+                if(result->limited)result->message="Preview stopped before finding flow samples. Update flow for more detail.";
+                else if(sampledZero)result->message="The vector field is zero at the sampled positions.";
+                else result->message="No flow samples in the selected region.";
             }
-            current->message=message;
-        } catch(const std::exception& error) {message=error.what();failedKey=key;failedFrame=context;currentRequest=false;}
+            outcome.snapshot=std::move(result);
+        } catch(const std::exception& error) {outcome.error=error.what();}
+        return outcome;
     }
 
     std::shared_ptr<RayFEM::RenderFrame> context;
@@ -405,7 +481,9 @@ private:
     std::vector<bool> retained;
     std::optional<RayFEM::ClipPlane> plane;
     std::deque<std::shared_ptr<Snapshot>> cache;
-    std::deque<std::shared_ptr<MagnitudeRange>> ranges;
+    std::shared_ptr<Shared> shared=std::make_shared<Shared>();
+    RayFEM::UI::FramePipeline* worker=nullptr;
+    bool inFlight=false;
     std::shared_ptr<MagnitudeRange> colorSource;
     std::optional<RayFEM::ColorScaleMapping> colorMapping;
     RayFEM::ColorScaleOptions colorSettings;

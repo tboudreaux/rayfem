@@ -10,6 +10,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Each trace stores only scalar samples. A weak backfill queue does not extend
@@ -29,6 +30,18 @@ class TrackingPanel {
 public:
     bool HasTracks() const {return !tracks.empty();}
     bool TakePlotRequest() {const bool result=plotRequested;plotRequested=false;return result;}
+
+    // Colors of every tracked DOF on this frame, matching DofColor per index.
+    std::unordered_map<int,ImU32> DofColors(const RayFEM::RenderFrame& frame,const std::string& field) const {
+        std::unordered_map<int,ImU32> colors;
+        for(const auto& t:tracks) {
+            const auto& r=t.tracker.request();
+            if(colors.contains(r.dof) || !t.visible || r.kind!=RayFEM::MeasurementKind::DofCoefficient || r.field_name!=field ||
+               t.session!=frame.session_id || t.mesh!=frame.mesh_id || t.revision!=frame.mesh_revision) continue;
+            if(const ImU32 color=DofColor(frame,field,r.dof)) colors.emplace(r.dof,color);
+        }
+        return colors;
+    }
 
     ImU32 DofColor(const RayFEM::RenderFrame& frame,const std::string& field,int dof) const {
         for(const auto& t:tracks) {

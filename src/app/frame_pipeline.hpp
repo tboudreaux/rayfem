@@ -16,6 +16,7 @@
 #include <deque>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -137,6 +138,7 @@ struct SurfaceRequest {
     bool automatic_range = true;
     double minimum = 0, maximum = 1;
     bool boundaries = false;
+    bool dofs = false;
 };
 
 struct SurfaceResult {
@@ -145,6 +147,8 @@ struct SurfaceResult {
     std::vector<LineSegment> boundaries;
     bool boundaries_ready = false;
     std::vector<bool> retained;
+    std::vector<DofPoint> dofs;
+    bool dofs_ready = false;
     ElementPicker picker;
     bool has_range = false;
     ColorScaleMapping mapping{};
@@ -200,6 +204,14 @@ public:
 
     bool Busy() const { std::lock_guard lock(mutex_); return building_ || pending_.has_value(); }
 
+    // UI thread: run panel work on the worker, replacing any job still queued
+    // on the same channel. Jobs must use only compute twins and their own
+    // captured state, and report back through state they share with the UI.
+    void Submit(const std::string& channel, std::function<void()> job) {
+        { std::lock_guard lock(mutex_); jobs_[channel] = std::move(job); }
+        wake_.notify_all();
+    }
+
     // UI thread: run work that must not overlap the worker's MFEM use (for
     // example loading an archive) on the worker, and wait for it.
     template<class F> auto RunOnWorker(F&& work) -> decltype(work()) {
@@ -240,11 +252,12 @@ private:
             {
                 std::unique_lock lock(mutex_);
                 wake_.wait_for(lock, std::chrono::milliseconds(2), [&] {
-                    return stop.stop_requested() || !tasks_.empty() || pending_.has_value();
+                    return stop.stop_requested() || !tasks_.empty() || pending_.has_value() || !jobs_.empty();
                 });
                 if (stop.stop_requested()) break;
                 if (!tasks_.empty()) { task = std::move(tasks_.front()); tasks_.pop_front(); }
                 else if (pending_) { request = std::move(pending_); pending_.reset(); building_ = true; }
+                else if (!jobs_.empty()) { task = std::move(jobs_.begin()->second); jobs_.erase(jobs_.begin()); }
             }
             if (task) { task(); continue; }
             // New frames first: decoding is never skipped, but only the
@@ -340,6 +353,10 @@ private:
                 result.distribution = range.samples;
                 result.has_range = true;
             }
+            if (request.dofs && field) {
+                result.dofs = SampleDofs(mesh, *field, options, 20000, result.retained.empty() ? nullptr : &result.retained);
+                result.dofs_ready = true;
+            }
             if (!result.data.positions.empty())
                 result.picker.Build(result.data.positions, result.data.element_ids);
         } catch (const std::exception& e) { result.error = e.what(); }
@@ -356,6 +373,7 @@ private:
     bool building_ = false;
     std::deque<SurfaceResult> results_;
     std::deque<std::function<void()>> tasks_;
+    std::map<std::string, std::function<void()>> jobs_;
     std::unordered_map<const mfem::Mesh*, MeshPair> meshes_;  // worker only
     std::deque<RangeEntry> ranges_;                          // worker only
     SpaceCache spaces_;                                      // UI thread only
