@@ -40,6 +40,7 @@
 #include "flow_panel.hpp"
 #include "edge_renderer.hpp"
 #include "dof_renderer.hpp"
+#include "ray_placement.hpp"
 #include "element_picker.hpp"
 #include "element_panel.hpp"
 #include "mouse_modifiers.hpp"
@@ -160,6 +161,7 @@ public:
         SetTargetFPS(opts.fps);
         elementExplosion=opts.explosion;
         flow.SetWorker(&pipeline);
+        profiles.SetWorker(&pipeline);
         rlImGuiSetup(true);
         ImGui::GetIO().IniFilename = nullptr;
         ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -203,6 +205,7 @@ public:
         streamlineRenderer.Shutdown();
         edgeRenderer.Shutdown();
         dofRenderer.Shutdown();
+        rayPlacement.Shutdown();
         ranges.clear();
         if (target.id) UnloadRenderTexture(target);
         UnloadShader(shader);
@@ -263,6 +266,7 @@ private:
         ranges.clear();
         automaticColorRange=true;
         profiles = ProfilePanel{};
+        profiles.SetWorker(&pipeline);
         tracking = TrackingPanel{};
         surfaceTrace = SurfaceTracePanel{};
         flow = FlowPanel{};
@@ -731,6 +735,9 @@ private:
         auto frame=Current();auto* gf=Field(frame);
         elements.Context(frame);
         profiles.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
+        if(const auto request=profiles.TakePlacementRequest()) {
+            if(*request<0)rayPlacement.Begin();else rayPlacement.Edit(*request,profiles.Anchors());
+        }
         surfaceTrace.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
         flow.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
         tracking.SetExcludedMaterials(excludedMaterials,frames);
@@ -835,6 +842,44 @@ private:
         }
         ImGui::EndChild();
         ImGui::End();
+        DrawRayPlacement();
+    }
+
+    // The element viewer for ray endpoints, as its own window over the viewport.
+    void DrawRayPlacement() {
+        if(!rayPlacement.Active())return;
+        const auto frame=Current();
+        if(!frame){rayPlacement.Cancel();return;}
+        const auto settings=RenderSettings(frame);
+        const ViewCache* shown=cache.empty()?nullptr:&cache.back();
+        auto color=[&](double value) {
+            if(shown && shown->hasFieldRange)
+                return RayFEM::FieldColor(value,shown->colorMapping,static_cast<RayFEM::ColorMap>(colorMap),reverseColors);
+            return Color{155,195,220,255};
+        };
+        // Faint whole-mesh edges (or a see-through surface when edges are off)
+        // show where the element sits. The exploded view would not line up.
+        auto context=[&](const Camera3D& view,Vector2 viewport) {
+            if(!shown || elementExplosion>0) return;
+            const auto& palette=RayFEM::UI::Palette();
+            const ImU32 text=palette.text;
+            const Color faint{static_cast<unsigned char>(text&0xff),static_cast<unsigned char>((text>>8)&0xff),
+                              static_cast<unsigned char>((text>>16)&0xff),70};
+            if(shown->edges_uploaded && shown->edgeModel.meshCount) {
+                edgeRenderer.Draw(shown->edgeModel,view,viewport,radius,faint,false);
+            } else if(shown->model.meshCount) {
+                rlDisableDepthMask();
+                DrawModel(shown->model,{0,0,0},1,{255,255,255,28});
+                rlDrawRenderBatchActive();
+                rlEnableDepthMask();
+            }
+        };
+        if(const auto anchors=rayPlacement.Draw(frame,coloring==0?Field(frame):nullptr,settings,std::max(4,settings.refinement),
+                                                viewportOrigin,viewportSize,shader,color,camera,context)) {
+            profiles.SetAnchors(*anchors);
+            if(!profiles.Enabled())profiles.OpenRay();
+            inspectorTab=1;plotTab=0;showPlots=true;
+        }
     }
 
     // A horizontal grip above the plots; dragging it trades viewport and plot height.
@@ -1142,8 +1187,9 @@ private:
         // Use the same immediate input snapshot for hit testing and presses.
         // ImGui can defer a position event when a press arrives in that frame.
         Vector2 mouse=GetMousePosition();
+        viewportOrigin=origin;viewportSize=size;
         bool hovered=RayFEM::CameraViewportContains(mouse,{origin.x,origin.y,size.x,size.y}) &&
-            IsWindowFocused() &&
+            IsWindowFocused() && !rayPlacement.Covers(mouse) &&
             !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel);
         RayFEM::CameraInputSnapshot input{
             mouse,hovered,
@@ -1163,7 +1209,14 @@ private:
                 cameraAdjusted=true;
         }
         const bool meshHovered=hovered && !cubeInput.owns_pointer;
-        bool profileDrag=!pickingDof && profiles.HandleInput(origin,size,camera,meshHovered);
+        // Rays are drawn on the last displayed surface.
+        const ViewCache* pickEntry=cache.empty()?nullptr:&cache.back();
+        auto pickSurface=[&](Ray ray)->std::optional<Vector3> {
+            if(!pickEntry || !showSurface) return std::nullopt;
+            const auto hit=pickEntry->picker.Pick(ray);
+            return hit?std::optional<Vector3>{hit->position}:std::nullopt;
+        };
+        bool profileDrag=!pickingDof && profiles.HandleInput(origin,size,camera,meshHovered,pickSurface);
         // A short press selects; a drag remains an orbit. Capture the mesh so
         // streamed replacement geometry cannot receive a stale mouse release.
         const auto clickFrame=Current();
@@ -1196,8 +1249,12 @@ private:
                elementPressIdentity==meshIdentity(active->frame)) {
                 const auto hit=active->picker.Pick(GetScreenToWorldRayEx(
                     {mouse.x-origin.x,mouse.y-origin.y},camera,width,height));
-                elements.Select(hit?std::optional<int>{hit->element}:std::nullopt,elementPressAdditive);
-                if(hit)inspectorTab=2;
+                // While placing a ray, a click chooses that endpoint's element.
+                if(rayPlacement.WantsElement()) {if(hit)rayPlacement.ChooseElement(hit->element);}
+                else {
+                    elements.Select(hit?std::optional<int>{hit->element}:std::nullopt,elementPressAdditive);
+                    if(hit)inspectorTab=2;
+                }
             }
             elementPress=false;
         }
@@ -1285,6 +1342,18 @@ private:
                       RayFEM::UI::CardRounding);
         if (active && showDofs) DrawDofs(*active,origin,size,meshHovered);
         profiles.DrawHandles(origin,size,camera);
+        if(rayPlacement.Active() && Current()) {
+            const Matrix viewProjection=MatrixMultiply(MatrixLookAt(camera.position,camera.target,camera.up),
+                MatrixPerspective(camera.fovy*DEG2RAD,double(width)/double(height),rlGetCullDistanceNear(),rlGetCullDistanceFar()));
+            auto project=[&](Vector3 p,ImVec2& out) {
+                const Quaternion q=QuaternionTransform({p.x,p.y,p.z,1},viewProjection);
+                if(!(q.w>1e-6f))return false;
+                out={origin.x+(q.x/q.w+1)*.5f*width,origin.y+(1-q.y/q.w)*.5f*height};
+                return true;
+            };
+            try {rayPlacement.DrawMainMarkers(ImGui::GetWindowDrawList(),*Current()->mesh,RenderSettings(Current()),project);}
+            catch(const std::exception& e){error=e.what();}
+        }
         if (active && active->hasFieldRange && coloring==0) {
             const float x=origin.x+24,y=origin.y+size.y-48,w=220;
             draw->AddRectFilled({x-12,y-26},{x+w+12,y+36},RayFEM::UI::Palette().plot_background,RayFEM::UI::OverlayRounding);
@@ -1439,6 +1508,11 @@ private:
             draw->AddText(font,fontSize,{left+padding+iconWidth,y+7},palette.text,text,nullptr,wrap);
             y=b.y+8;
         };
+        if(rayPlacement.Current()==RayFEM::UI::RayPlacement::Step::ChooseElement)
+            banner(ICON_FA_CROSSHAIRS,rayPlacement.Endpoint()==0?"Click the element where the ray starts (step 1 of 2). Drag to orbit; Esc to cancel.":
+                                                                 "Click the element where the ray ends (step 2 of 2). Drag to orbit; Esc to cancel.",palette.accent);
+        else if(rayPlacement.Current()==RayFEM::UI::RayPlacement::Step::PlacePoint)
+            banner(ICON_FA_CROSSHAIRS,"Place the point on the element in the inset viewer, or click another element here.",palette.accent);
         if(pickingDof)
             banner(ICON_FA_CROSSHAIRS,"Click a DOF marker to track its coefficient.  Press Esc or Cancel pick to stop.",palette.accent);
         if(!error.empty()) banner(ICON_FA_TRIANGLE_EXCLAMATION,error.c_str(),palette.warning);
@@ -1642,6 +1716,8 @@ private:
     Shader shader{};
     RayFEM::UI::EdgeRenderer edgeRenderer;
     RayFEM::UI::DofRenderer dofRenderer;
+    RayFEM::UI::RayPlacement rayPlacement;
+    ImVec2 viewportOrigin{},viewportSize{};
     RayFEM::UI::StreamlineRenderer streamlineRenderer;
     int normalLoc,pointLoc,enabledLoc,depthBiasLoc;
     Vector3 sliceNormal={1,0,0},slicePoint={0,0,0};

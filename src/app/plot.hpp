@@ -25,6 +25,8 @@ struct PlotOptions {
     double cursor_x = std::numeric_limits<double>::quiet_NaN();
     // Optional output. A click inside the axes writes the domain coordinate.
     double* clicked_x = nullptr;
+    // Optional output. Hovering inside the axes writes the domain coordinate.
+    double* hovered_x = nullptr;
 };
 struct PlotRange {
     double x_min = 0, x_max = 1, y_min = 0, y_max = 1;
@@ -219,6 +221,7 @@ inline void PlotLines(const char* id, std::span<const PlotSeriesView> series,
         draw->AddLine({mouse.x,low.y},{mouse.x,high.y},Palette().crosshair);
         draw->AddLine({low.x,mouse.y},{high.x,mouse.y},Palette().crosshair);
         if(options.clicked_x && ImGui::IsMouseClicked(ImGuiMouseButton_Left))*options.clicked_x=x;
+        if(options.hovered_x)*options.hovered_x=x;
         ImGui::BeginTooltip();
         ImGui::Text("%s %.7g",options.x_label&&*options.x_label?options.x_label:"x",x);
         ImGui::TextDisabled("Cursor value %.7g",y);
