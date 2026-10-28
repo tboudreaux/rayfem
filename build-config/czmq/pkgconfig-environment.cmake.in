@@ -1,0 +1,2 @@
+# Use the same ZeroMQ package that the parent Meson build resolved.
+set(ENV{PKG_CONFIG_PATH} "@ZMQ_PKGCONFIG_DIR@@PATH_SEPARATOR@$ENV{PKG_CONFIG_PATH}")

@@ -1,0 +1,18 @@
+option('glvis_experiment', type: 'boolean', value: false,
+       description: 'Build the experimental embedded GLVis viewer')
+option('build_viewer', type: 'feature', value: 'auto',
+       description: 'Build and install the viewer (auto enables it in standalone builds)')
+option('build_examples', type: 'feature', value: 'auto',
+       description: 'Build streaming examples (auto enables them in standalone builds)')
+option('build_tests', type: 'feature', value: 'auto',
+       description: 'Build tests (auto enables them in standalone builds)')
+option('mfem_provider', type: 'combo', choices: ['auto', 'external', 'bundled'], value: 'auto',
+       description: 'Reuse a parent/installed MFEM; auto builds bundled MFEM only when none is available')
+option('mfem_prefix', type: 'string', value: '',
+       description: 'Existing MFEM installation prefix; never builds that external project')
+option('serif', type: 'feature', value: 'auto',
+       description: 'Read SERiF archives using an already-built external SERiF checkout')
+option('serif_source_dir', type: 'string', value: '',
+       description: 'Existing SERiF source directory (no configure or build is performed)')
+option('serif_build_dir', type: 'string', value: '',
+       description: 'Existing SERiF build directory; defaults to SOURCE/build')

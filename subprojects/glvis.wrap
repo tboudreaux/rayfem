@@ -1,0 +1,6 @@
+[wrap-git]
+url=https://github.com/glvis/glvis
+revision=v4.5
+depth=1
+
+[cmake]

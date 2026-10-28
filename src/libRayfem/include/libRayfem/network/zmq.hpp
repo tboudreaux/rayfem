@@ -1,6 +1,7 @@
 #pragma once
 
 #include "czmq.h"
+#include <memory>
 
 namespace RayFEM {
     template <typename T, void (*Destroyer)(T**)>
@@ -14,7 +15,7 @@ namespace RayFEM {
 
         ZmqPtr(ZmqPtr&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
         ZmqPtr& operator=(ZmqPtr&& other) noexcept {
-            if (this != &other) {
+            if (this != std::addressof(other)) {
                 if (ptr_) Destroyer(&ptr_);
                 ptr_ = other.ptr_;
                 other.ptr_ = nullptr;

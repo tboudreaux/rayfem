@@ -1,95 +1,417 @@
-#include "libRayfem/frame/render.hpp"
 #include "libRayfem/network/server.hpp"
 #include "libRayfem/network/zmq.hpp"
+#include "../mesh/input_validation.hpp"
 
-#include <optional>
-#include <thread>
-#include <mutex>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <deque>
-
-#include "czmq.h"
+#include <limits>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace RayFEM {
-    Server::Server(
-        const std::string& listen,
-        const size_t port
-    ) :
-    m_listen(listen),
-    m_port(port),
-    m_running(true),
-    m_worker(std::thread(&Server::networkLoop, this)) {}
-
-    Server::~Server() {
-        m_running = false;
-        if (m_worker.joinable()) {
-            m_worker.join();
-        }
-    }
-
-    std::unique_ptr<RenderFrame> Server::fetchLatestFrame() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_frameQueue.empty()) return nullptr;
-
-        auto frame = std::move(m_frameQueue.back());
-        m_frameQueue.clear();
-        return frame;
-    }
-
-    void Server::networkLoop() {
-        std::string address = "tcp://" + m_listen + ":" + std::to_string(m_port);
-
-        SocketPtr pull(zsock_new_pull(address.c_str()));
-
-        zpoller_t *poller = zpoller_new(pull.get(), NULL);
-
-        while (m_running) {
-            void *which = zpoller_wait(poller, 100);
-            if (!which) continue;
-
-            MsgPtr msg(zmsg_recv(pull.get()));
-            if (!msg) continue;
-
-            auto frame = std::make_unique<RenderFrame>();
-
-            zframe_t *h_frame = zmsg_pop(msg.get());
-            if (zframe_size(h_frame) == sizeof(PacketHeader)) {
-                frame->metadata = reinterpret_cast<PacketHeader *>(zframe_data(h_frame))->metadata;
-            }
-
-            zframe_destroy(&h_frame);
-
-            zframe_t *m_frame = zmsg_pop(msg.get());
-            zframe_t *g_frame = zmsg_pop(msg.get());
-
-            if (m_frame && g_frame) {
-                std::string m_data(reinterpret_cast<char *>(zframe_data(m_frame)), zframe_size(m_frame));
-                std::string g_data(reinterpret_cast<char *>(zframe_data(g_frame)), zframe_size(g_frame));
-
-                std::cout << g_data << std::endl;
-
-                std::stringstream m_ss(m_data);
-                std::stringstream g_ss(g_data);
-
-                try {
-                    frame->mesh = std::make_unique<mfem::Mesh>(m_ss);
-                    frame->mesh->EnsureNodes();
-                    frame->gf = std::make_unique<mfem::GridFunction>(frame->mesh.get(), g_ss);
-                } catch (...) {
-                    std::cerr << "Error creating mesh frame" << std::endl;
-                }
-
-                ++m_frameCount;
-
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    m_frameQueue.push_back(std::move(frame));
-                }
-            }
-
-            zframe_destroy(&m_frame);
-            zframe_destroy(&g_frame);
-
-        }
-        zpoller_destroy(&poller);
-    }
+namespace {
+constexpr size_t MaxQueuedFrames = 64;
+constexpr size_t MaxQueuedBytes = 128 * 1024 * 1024;
+constexpr size_t MaxCachedMeshes = 16;
+constexpr size_t MaxCachedMeshBytes = 128 * 1024 * 1024;
+struct SerializedMesh {
+    Protocol::Header header;
+    std::string data;
+    uint64_t last_use = 0;
+    uint32_t last_frame = 0;
+    bool has_frame = false;
+    // Accessed only by the fetchFrames caller, never by the receiver.
+    std::weak_ptr<mfem::Mesh> decoded;
+    bool decode_failed = false;
+    size_t estimated_bytes = 0;
+};
+struct SerializedFrame {
+    Protocol::Header header;
+    std::shared_ptr<SerializedMesh> mesh;
+    std::vector<std::pair<std::string, std::string>> fields;
+    std::string displacement;
+    size_t queued_bytes = 0;
+};
+std::string meshKey(const Protocol::Header& header) {
+    return std::to_string(header.session_id) + ":" + std::to_string(header.mesh_id);
 }
+bool readBlob(std::string_view payload, size_t& offset, size_t bytes, std::string& target) {
+    if (offset > payload.size() || bytes > payload.size() - offset) return false;
+    target.assign(payload.data() + offset, bytes);
+    offset += bytes;
+    return true;
+}
+bool parseFrame(std::string_view payload, SerializedFrame& frame, std::string& error) {
+    size_t pos = 0;
+    std::unordered_set<std::string> names;
+    for (uint32_t i = 0; i < frame.header.field_count; ++i) {
+        uint64_t name_size = 0, data_size = 0;
+        std::string name, data;
+        if (!Protocol::readInteger(payload, pos, 4, name_size) ||
+            !Protocol::readInteger(payload, pos, 8, data_size) ||
+            !name_size || name_size > Protocol::MaxNameBytes || !data_size ||
+            !readBlob(payload, pos, name_size, name) || !readBlob(payload, pos, data_size, data)) {
+            error = "Truncated or invalid frame field"; return false;
+        }
+        if (name.find('\0') != std::string::npos || !names.insert(name).second) {
+            error = "Invalid or duplicate field name"; return false;
+        }
+        frame.fields.emplace_back(std::move(name), std::move(data));
+    }
+    if (frame.header.flags & Protocol::HasDisplacement) {
+        uint64_t bytes = 0;
+        if (!Protocol::readInteger(payload, pos, 8, bytes) || !bytes || !readBlob(payload, pos, bytes, frame.displacement)) {
+            error = "Truncated displacement field"; return false;
+        }
+    }
+    if (pos != payload.size()) { error = "Unexpected bytes after frame payload"; return false; }
+    return true;
+}
+
+size_t estimateFieldBytes(const mfem::GridFunction& field, size_t serialized_bytes) {
+    const auto& space = *field.FESpace();
+    size_t element_dofs = 0, maximum_element_dofs = 0;
+    for (int e = 0; e < space.GetNE(); ++e) {
+        const size_t dofs = space.GetFE(e)->GetDof();
+        element_dofs += dofs;
+        maximum_element_dofs = std::max(maximum_element_dofs, dofs);
+    }
+    // Allow for coefficient storage, global/local DOF maps, connectivity, and
+    // dense local FE workspaces. Serialized size provides an additional proxy
+    // for collection-specific bookkeeping without depending on MFEM internals.
+    return serialized_bytes + static_cast<size_t>(field.Size()) * sizeof(mfem::real_t)
+        + static_cast<size_t>(space.GetNDofs()) * 8 * sizeof(int)
+        + element_dofs * 2 * sizeof(int) + static_cast<size_t>(space.GetNE()) * 64
+        + maximum_element_dofs * maximum_element_dofs * 2 * sizeof(mfem::real_t);
+}
+
+size_t estimateMeshBytes(const mfem::Mesh& mesh, size_t serialized_bytes) {
+    size_t bytes = serialized_bytes * 2 + static_cast<size_t>(mesh.GetNV()) * 3 * sizeof(mfem::real_t)
+        + static_cast<size_t>(mesh.GetNE()) * 512 + static_cast<size_t>(mesh.GetNBE()) * 128
+        + static_cast<size_t>(mesh.GetNEdges()) * 64 + static_cast<size_t>(mesh.GetNumFaces()) * 128;
+    if (mesh.GetNodes()) bytes += estimateFieldBytes(*mesh.GetNodes(), 0);
+    return bytes;
+}
+
+using detail::validateCollectionOrder;
+using detail::validateMeshText;
+using detail::MaxNURBSOrder;
+
+// MFEM's text loader does not validate VDim/Ordering before allocating. Validate
+// those values and read the solution explicitly so truncated/nonfinite data
+// cannot silently become an apparently valid frame.
+std::unique_ptr<mfem::GridFunction> decodeField(mfem::Mesh& mesh, const std::string& data) {
+    std::istringstream preflight(data);
+    std::string format, collection_line, dimension_line, ordering_line;
+    std::getline(preflight, format);
+    std::getline(preflight, collection_line);
+    std::getline(preflight, dimension_line);
+    std::getline(preflight, ordering_line);
+    if (format != "FiniteElementSpace" && format != "MFEM FiniteElementSpace v1.0")
+        throw std::runtime_error("Invalid finite element space header");
+    if (!collection_line.starts_with("FiniteElementCollection: ") || collection_line.size() > 160)
+        throw std::runtime_error("Invalid finite element collection");
+    auto readProperty = [](const std::string& line, const char* label) {
+        std::istringstream input(line);
+        std::string name, extra;
+        int result = -1;
+        if (!(input >> name >> result) || name != label || (input >> extra))
+            throw std::runtime_error("Invalid finite element space property");
+        return result;
+    };
+    const int vdim = readProperty(dimension_line, "VDim:");
+    const int ordering = readProperty(ordering_line, "Ordering:");
+    if (vdim < 1 || vdim > 64 || (ordering != 0 && ordering != 1))
+        throw std::runtime_error("Unsupported field dimension or ordering");
+    validateCollectionOrder(std::string_view(collection_line).substr(25));
+    std::string section;
+    while (std::getline(preflight, section)) {
+        if (section == "NURBS_order" || section == "NURBS_orders") {
+            if (!mesh.NURBSext) throw std::runtime_error("NURBS field requires a NURBS mesh");
+            const int count = section == "NURBS_order" ? 1 : mesh.NURBSext->GetNKV();
+            for (int i = 0; i < count; ++i) {
+                int order = 0;
+                if (!(preflight >> order) || order < 0 || order > MaxNURBSOrder)
+                    throw std::runtime_error("Invalid or excessive NURBS field order");
+            }
+        }
+    }
+    std::istringstream stream(data);
+    auto space = std::make_unique<mfem::FiniteElementSpace>();
+    auto collection = std::unique_ptr<mfem::FiniteElementCollection>(space->Load(&mesh, stream));
+    if (stream.fail() || space->GetVSize() < 1 || static_cast<size_t>(space->GetVSize()) > data.size())
+        throw std::runtime_error("Truncated or invalid finite element space");
+    auto result = std::make_unique<mfem::GridFunction>(space.get());
+    result->MakeOwner(collection.release());
+    space.release();
+    for (int i = 0; i < result->Size(); ++i) {
+        double value = 0;
+        if (!(stream >> value) || !std::isfinite(value))
+            throw std::runtime_error("Truncated or non-finite grid function");
+        (*result)(i) = value;
+    }
+    stream >> std::ws;
+    if (!stream.eof()) throw std::runtime_error("Unexpected data after grid function");
+    return result;
+}
+} // namespace
+
+struct Server::Impl {
+    std::string address, control_address;
+    size_t stream_port;
+    std::atomic<bool> running{true};
+    std::atomic<bool> is_ready{false};
+    std::atomic<bool> viewer_ready{false};
+    std::atomic<bool> shutdown_requested{false};
+    std::atomic<size_t> received{0}, dropped{0}, errors{0};
+    mutable std::mutex mutex;
+    std::string last_error;
+    std::deque<SerializedFrame> queue;
+    size_t queued_bytes = 0;
+    std::thread worker;
+
+    Impl(std::string endpoint, std::string control_endpoint, size_t port)
+        : address(std::move(endpoint)), control_address(std::move(control_endpoint)),
+          stream_port(port), worker(&Impl::networkLoop, this) {}
+    ~Impl() { running = false; if (worker.joinable()) worker.join(); }
+    void error(std::string message) {
+        ++errors;
+        std::lock_guard lock(mutex);
+        last_error = std::move(message);
+    }
+    void answerControl(zsock_t* socket) {
+        FramePtr request(zframe_recv(socket));
+        if (!request) return;
+        bool multipart = zsock_rcvmore(socket);
+        while (running && zsock_rcvmore(socket)) {
+            FramePtr ignored(zframe_recv(socket));
+            if (!ignored) return;
+        }
+        std::string response = "RAYFEM_INVALID 1";
+        bool shutdown = false;
+        if (!multipart && zframe_size(request) <= 256) {
+            std::istringstream input(std::string(reinterpret_cast<const char*>(zframe_data(request)), zframe_size(request)));
+            std::string command, nonce, extra;
+            int version = 0;
+            size_t requested_port = 0;
+            if ((input >> command >> version >> requested_port >> nonce) && !(input >> extra) &&
+                (command == "RAYFEM_PROBE" || command == "RAYFEM_SHUTDOWN") &&
+                version == 1 && requested_port == stream_port &&
+                !nonce.empty() && nonce.size() <= 64 &&
+                std::all_of(nonce.begin(), nonce.end(), [](unsigned char c) {
+                    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                })) {
+                shutdown = command == "RAYFEM_SHUTDOWN";
+                response = std::string(shutdown ? "RAYFEM_STOPPING 1 " :
+                    (viewer_ready ? "RAYFEM_READY 1 " : "RAYFEM_STARTING 1 "))
+                    + std::to_string(stream_port) + " " + nonce;
+            }
+        }
+        if (zstr_send(socket, response.c_str()) == 0 && shutdown) shutdown_requested = true;
+    }
+    void networkLoop() {
+        // Close the control endpoint last: its disconnect confirms that the
+        // streaming receiver and queued network state have been released.
+        SocketPtr control;
+        SocketPtr pull(zsock_new(ZMQ_PULL));
+        if (!pull) { error("Cannot create receiver socket"); return; }
+        zsock_set_ipv6(pull, 1);
+        zsock_set_linger(pull, 0);
+        zsock_set_rcvtimeo(pull, 100);
+        zsock_set_rcvhwm(pull, 64);
+        zsock_set_maxmsgsize(pull, Protocol::HeaderBytes + Protocol::MaxPayloadBytes);
+        if (zsock_bind(pull, "%s", address.c_str()) < 0) {
+            error("Cannot bind receiver to " + address); return;
+        }
+        if (!control_address.empty()) {
+            control = SocketPtr(zsock_new(ZMQ_REP));
+            if (!control) { error("Cannot create viewer control socket"); return; }
+            zsock_set_ipv6(control, 1);
+            // Flush the shutdown acknowledgement before the main thread's
+            // normal destruction closes this connection.
+            zsock_set_linger(control, 100);
+            zsock_set_rcvtimeo(control, 100);
+            zsock_set_sndtimeo(control, 100);
+            zsock_set_rcvhwm(control, 16);
+            zsock_set_maxmsgsize(control, 256);
+            if (zsock_bind(control, "%s", control_address.c_str()) < 0) {
+                error("Cannot bind viewer control endpoint to " + control_address); return;
+            }
+        }
+        is_ready = true;
+        std::unordered_map<std::string, std::shared_ptr<SerializedMesh>> meshes;
+        size_t mesh_bytes = 0;
+        uint64_t use_sequence = 0;
+        while (running) {
+            zmq_pollitem_t sockets[] = {
+                {zsock_resolve(pull), 0, ZMQ_POLLIN, 0},
+                {control ? zsock_resolve(control) : nullptr, 0, ZMQ_POLLIN, 0}
+            };
+            if (zmq_poll(sockets, control ? 2 : 1, 100) <= 0) continue;
+            if (control && (sockets[1].revents & ZMQ_POLLIN)) answerControl(control);
+            if (!(sockets[0].revents & ZMQ_POLLIN)) continue;
+            FramePtr packet(zframe_recv(pull));
+            if (!packet) continue;
+            if (zsock_rcvmore(pull)) {
+                while (running && zsock_rcvmore(pull)) { FramePtr ignored(zframe_recv(pull)); if (!ignored) break; }
+                error("Multipart messages are not valid RayFEM v2 packets");
+                continue;
+            }
+            try {
+                std::string_view bytes(reinterpret_cast<const char*>(zframe_data(packet)), zframe_size(packet));
+                Protocol::Header header;
+                std::string why;
+                if (!Protocol::decodeHeader(bytes, header, why)) { error(why); continue; }
+                const auto payload = bytes.substr(Protocol::HeaderBytes);
+                const std::string key = meshKey(header);
+                auto found = meshes.find(key);
+                if (header.kind == Protocol::Kind::Mesh) {
+                    if (found != meshes.end() && header.mesh_revision <= found->second->header.mesh_revision) {
+                        error("Stale mesh registration"); continue;
+                    }
+                    if (!payload.starts_with("MFEM mesh v") && !payload.starts_with("MFEM NURBS mesh v") && !payload.starts_with("MFEM NC mesh v")) {
+                        error("Invalid MFEM mesh header"); continue;
+                    }
+                    if (found != meshes.end()) { mesh_bytes -= found->second->data.size(); meshes.erase(found); }
+                    while (!meshes.empty() && (meshes.size() >= MaxCachedMeshes || mesh_bytes + payload.size() > MaxCachedMeshBytes)) {
+                        auto oldest = std::min_element(meshes.begin(), meshes.end(), [](const auto& a, const auto& b) { return a.second->last_use < b.second->last_use; });
+                        mesh_bytes -= oldest->second->data.size();
+                        meshes.erase(oldest);
+                    }
+                    auto mesh = std::make_shared<SerializedMesh>();
+                    mesh->header = header;
+                    mesh->data = payload;
+                    mesh->last_use = ++use_sequence;
+                    mesh_bytes += mesh->data.size();
+                    meshes.emplace(key, std::move(mesh));
+                    continue;
+                }
+                if (found == meshes.end() || found->second->header.mesh_revision != header.mesh_revision) {
+                    error("Frame references an unknown or stale mesh; sendMesh is required"); continue;
+                }
+                auto& mesh = found->second;
+                if (mesh->has_frame && header.metadata.frame_index <= mesh->last_frame) {
+                    error("Stale or duplicate frame index"); continue;
+                }
+                SerializedFrame frame;
+                frame.header = header;
+                frame.mesh = mesh;
+                if (!parseFrame(payload, frame, why)) { error(why); continue; }
+                mesh->last_use = ++use_sequence;
+                mesh->has_frame = true;
+                mesh->last_frame = header.metadata.frame_index;
+                frame.queued_bytes = payload.size() + mesh->data.size();
+                std::lock_guard lock(mutex);
+                while (!queue.empty() && (queue.size() >= MaxQueuedFrames || queued_bytes + frame.queued_bytes > MaxQueuedBytes)) {
+                    queued_bytes -= queue.front().queued_bytes;
+                    queue.pop_front();
+                    ++dropped;
+                }
+                queued_bytes += frame.queued_bytes;
+                queue.push_back(std::move(frame));
+            } catch (const std::exception& exception) { error(std::string("Packet rejected: ") + exception.what()); }
+        }
+        is_ready = false;
+    }
+};
+
+Server::Server(const std::string& listen, size_t port, size_t control_port) {
+    if (port == 0 || port > 65535 || control_port > 65535 || control_port == port)
+        throw std::invalid_argument("Invalid RayFEM server/control port");
+    const auto host = listen.find(':') != std::string::npos && !listen.starts_with('[')
+        ? "[" + listen + "]" : listen;
+    m_impl = std::make_unique<Impl>("tcp://" + host + ":" + std::to_string(port),
+        control_port ? "tcp://" + host + ":" + std::to_string(control_port) : "", port);
+}
+Server::~Server() = default;
+std::vector<std::shared_ptr<RenderFrame>> Server::fetchFrames(size_t max_frames) {
+    std::vector<std::shared_ptr<RenderFrame>> result;
+    if (max_frames == 0) return result;
+    // Time budget is checked between complete frames: one unusually large frame
+    // may take longer, but normal bursts cannot monopolize the UI indefinitely.
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t attempt = 0; attempt < max_frames; ++attempt) {
+        SerializedFrame serialized;
+        {
+            std::lock_guard lock(m_impl->mutex);
+            if (m_impl->queue.empty()) break;
+            serialized = std::move(m_impl->queue.front());
+            m_impl->queued_bytes -= serialized.queued_bytes;
+            m_impl->queue.pop_front();
+        }
+        try {
+#ifndef MFEM_USE_EXCEPTIONS
+            throw std::runtime_error("Streaming requires MFEM_USE_EXCEPTIONS for safe decoding");
+#else
+            if (mfem::get_error_action() != mfem::MFEM_ERROR_THROW)
+                throw std::runtime_error("MFEM must use MFEM_ERROR_THROW for safe streaming");
+            auto mesh = serialized.mesh->decoded.lock();
+            if (!mesh) {
+                if (serialized.mesh->decode_failed) throw std::runtime_error("Mesh registration failed decoding");
+                try {
+                    validateMeshText(serialized.mesh->data);
+                    std::istringstream stream(serialized.mesh->data);
+                    // Preserve sender connectivity and DOF orientation: refinement
+                    // marking or orientation repair can reorder simplex nodes.
+                    mesh = std::make_shared<mfem::Mesh>(stream, 1, 0, false);
+                    if (stream.fail() || mesh->GetNE() < 1 || mesh->Dimension() < 1 || mesh->Dimension() > 3 || mesh->SpaceDimension() > 3)
+                        throw std::runtime_error("Invalid or unsupported mesh");
+                    serialized.mesh->estimated_bytes = estimateMeshBytes(*mesh, serialized.mesh->data.size());
+                    serialized.mesh->decoded = mesh;
+                } catch (...) { serialized.mesh->decode_failed = true; throw; }
+            }
+            auto frame = std::make_shared<RenderFrame>();
+            frame->metadata = serialized.header.metadata;
+            frame->mesh_id = serialized.header.mesh_id;
+            frame->session_id = serialized.header.session_id;
+            frame->mesh_revision = serialized.header.mesh_revision;
+            frame->mesh = std::move(mesh);
+            frame->estimated_mesh_bytes = serialized.mesh->estimated_bytes;
+            for (const auto& [name, data] : serialized.fields) {
+                frame->fields.push_back({name, decodeField(*frame->mesh, data)});
+                frame->estimated_bytes += estimateFieldBytes(*frame->fields.back().gf, data.size());
+            }
+            if (!serialized.displacement.empty()) {
+                frame->displacement = decodeField(*frame->mesh, serialized.displacement);
+                auto* space = frame->displacement->FESpace();
+                if (space->GetVDim() != frame->mesh->SpaceDimension() ||
+                    space->FEColl()->GetRangeType(frame->mesh->Dimension()) != mfem::FiniteElement::SCALAR)
+                    throw std::runtime_error("Displacement must be a pointwise vector field");
+                frame->estimated_bytes += estimateFieldBytes(*frame->displacement, serialized.displacement.size());
+            }
+            ++m_impl->received;
+            result.push_back(std::move(frame));
+#endif
+        } catch (const std::exception& exception) { m_impl->error(std::string("Frame rejected: ") + exception.what()); }
+        if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(12)) break;
+    }
+    return result;
+}
+std::shared_ptr<RenderFrame> Server::fetchLatestFrame() {
+    {
+        std::lock_guard lock(m_impl->mutex);
+        while (m_impl->queue.size() > 1) {
+            m_impl->queued_bytes -= m_impl->queue.front().queued_bytes;
+            m_impl->queue.pop_front();
+            ++m_impl->dropped;
+        }
+    }
+    auto frames = fetchFrames(1);
+    return frames.empty() ? nullptr : std::move(frames.back());
+}
+size_t Server::getReceivedFrameCount() const { return m_impl->received; }
+size_t Server::getDroppedFrameCount() const { return m_impl->dropped; }
+size_t Server::getErrorCount() const { return m_impl->errors; }
+size_t Server::getPendingFrameCount() const { std::lock_guard lock(m_impl->mutex); return m_impl->queue.size(); }
+bool Server::ready() const { return m_impl->is_ready; }
+void Server::markViewerReady(bool ready) { m_impl->viewer_ready = ready; }
+bool Server::shutdownRequested() const { return m_impl->shutdown_requested; }
+std::string Server::getLastError() const { std::lock_guard lock(m_impl->mutex); return m_impl->last_error; }
+} // namespace RayFEM

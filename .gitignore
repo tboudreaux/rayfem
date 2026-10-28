@@ -12,6 +12,11 @@ ENV.bak/
 *.egg-info/
 dist/
 build/
+build-rayfem/
+build-rayfem-serif/
+.rayfem-deps/
+imgui.ini
+rayfem-exports/
 *.egg
 
 # C and C++ (using Meson)
