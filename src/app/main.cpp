@@ -19,6 +19,7 @@
 #include "rlgl.h"
 #include "imgui.h"
 #include "rlImGui.h"
+#include "extras/IconsFontAwesome6.h"
 #include "czmq.h"
 #include "libRayfem/network/server.hpp"
 #include "libRayfem/mesh/converter.hpp"
@@ -167,6 +168,7 @@ public:
             }
         }
         ImGui::GetIO().FontDefault=uiFont?uiFont:ImGui::GetIO().Fonts->AddFontDefault(&font);
+        rlImGuiMergeFontAwesome(14);
         RayFEM::UI::ApplyLayout();
         RayFEM::UI::ApplyTheme(opts.light ? RayFEM::UI::ThemeMode::Light : RayFEM::UI::ThemeMode::Dark);
         rotationIcons=RayFEM::UI::LoadRotationIcons();
@@ -570,17 +572,35 @@ private:
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s",text);
     }
 
+    void DrawStatusIndicator(const std::string& label) {
+        const auto& palette=RayFEM::UI::Palette();
+        const ImU32 color=server.ready()?palette.success:palette.warning;
+        ImGui::AlignTextToFramePadding();
+        const ImVec2 position=ImGui::GetCursorScreenPos();
+        const float radius=ImGui::CalcTextSize(ICON_FA_CIRCLE).x*.3f;
+        const float center=position.y+ImGui::GetFrameHeight()*.5f;
+        ImGui::GetWindowDrawList()->AddCircleFilled({position.x+radius,center},radius,color);
+        ImGui::Dummy({radius*2,0});ImGui::SameLine(0,ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextColored(RayFEM::UI::ThemeText(color),"%s",label.c_str());
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+            ImGui::SetTooltip(server.ready()?"Waiting for frames on %s:%d. Received %zu so far.":"Starting the stream listener on %s:%d (%zu frames).",
+                              opts.listen.c_str(),opts.port,server.getReceivedFrameCount());
+    }
+
     void DrawUI() {
         ImGui::SetNextWindowPos({0,0});
         ImGui::SetNextWindowSize({static_cast<float>(GetScreenWidth()),static_cast<float>(GetScreenHeight())});
         ImGui::Begin("RayFEM",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
         const bool light = RayFEM::UI::CurrentTheme() == RayFEM::UI::ThemeMode::Light;
-        const char* themeLabel=light?"Dark mode":"Light mode";
-        const char* statusLabel=server.ready()?"Stream ready":"Connecting";
+        const char* openLabel=ICON_FA_FOLDER_OPEN "  Open";
+        const char* themeLabel=light?ICON_FA_MOON "###theme":ICON_FA_SUN "###theme";
+        const char* infoLabel=ICON_FA_CIRCLE_INFO "###info";
+        const std::string statusLabel=server.ready()?"Listening on :"+std::to_string(opts.port):"Starting listener";
         const auto& style=ImGui::GetStyle();
-        auto buttonWidth=[&](const char* label) {return ImGui::CalcTextSize(label).x+style.FramePadding.x*2;};
-        const float actionsWidth=buttonWidth("Open")+buttonWidth(themeLabel)+buttonWidth("Info")+
-            ImGui::CalcTextSize(statusLabel).x+3*style.ItemSpacing.x;
+        auto buttonWidth=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+style.FramePadding.x*2;};
+        const float statusWidth=ImGui::CalcTextSize(ICON_FA_CIRCLE).x*.6f+style.ItemInnerSpacing.x+ImGui::CalcTextSize(statusLabel.c_str()).x;
+        const float actionsWidth=buttonWidth(openLabel)+buttonWidth(themeLabel)+buttonWidth(infoLabel)+
+            statusWidth+3*style.ItemSpacing.x;
         const float actionsX=ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x-actionsWidth;
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(RayFEM::UI::ThemeText(RayFEM::UI::Palette().accent),"RayFEM");
@@ -599,17 +619,17 @@ private:
         ImGui::TextDisabled("/  %s",title.c_str());
         if (shorten) Tip(fieldName.c_str());
         ImGui::SameLine(actionsX);
-        if (ImGui::Button("Open")) fileDialog.Open();
+        if (ImGui::Button(openLabel)) fileDialog.Open();
         Tip("Open a .serif archive (Ctrl/Cmd+O). Files can also be dropped into the window.");
         ImGui::SameLine();
         if (ImGui::Button(themeLabel))
             RayFEM::UI::ApplyTheme(light ? RayFEM::UI::ThemeMode::Dark : RayFEM::UI::ThemeMode::Light);
-        Tip("Switch the workspace, plots, and mesh overlays between light and dark.");
+        Tip(light?"Switch to dark mode":"Switch to light mode");
         ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(RayFEM::UI::ThemeText(server.ready()?RayFEM::UI::Palette().success:RayFEM::UI::Palette().warning),"%s",statusLabel);
+        DrawStatusIndicator(statusLabel);
         ImGui::SameLine();
-        if (ImGui::Button("Info")) ImGui::OpenPopup("Session info");
+        if (ImGui::Button(infoLabel)) ImGui::OpenPopup("Session info");
+        Tip("Session details, statistics and mouse controls");
         if (ImGui::BeginPopup("Session info")) {
             ImGui::Text("%s:%d",opts.listen.c_str(),opts.port);
             ImGui::Text("%zu received / %zu queued",server.getReceivedFrameCount(),server.getPendingFrameCount());
@@ -668,28 +688,40 @@ private:
         ImGui::EndChild();
         ImGui::SameLine();
         ImGui::BeginChild("Workspace",{0,0},ImGuiChildFlags_AlwaysUseWindowPadding);
-        auto nextAction = [](const char* label, bool checkbox = false) {
+        // Toolbar groups: camera, picking, analysis views, then panels. Lit
+        // buttons show which of these modes are currently on.
+        auto action = [](const char* label, bool active, const char* tip, bool group = false) {
             const auto& style = ImGui::GetStyle();
-            const float width = ImGui::CalcTextSize(label).x + style.FramePadding.x*2 +
-                                (checkbox ? ImGui::GetFrameHeight() : 0);
-            RayFEM::UI::NextInlineItem(width);
+            const float gap = group ? style.ItemSpacing.x*2 : 0;
+            const float width = ImGui::CalcTextSize(label, nullptr, true).x + style.FramePadding.x*2;
+            if (RayFEM::UI::NextInlineItem(width + gap) && group) {
+                const float x = ImGui::GetItemRectMax().x + style.ItemSpacing.x*1.5f;
+                const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddLine({x, min.y+5}, {x, max.y-5}, ImGui::GetColorU32(ImGuiCol_Border));
+                ImGui::SameLine(0, style.ItemSpacing.x + gap);
+            }
+            const bool pressed = RayFEM::UI::ToggleButton(label, active);
+            Tip(tip);
+            return pressed;
         };
-        if(ImGui::Button("Fit")) {cameraAdjusted=false;if(auto* active=ActiveView();active && active->vertices) FitCamera(active->bounds);}
+        if(ImGui::Button(ICON_FA_EXPAND "  Fit")) {cameraAdjusted=false;if(auto* active=ActiveView();active && active->vertices) FitCamera(active->bounds);}
         Tip("Fit mesh in view (R)");
-        nextAction(pickingDof?"Cancel pick":"Pick DOF");
-        if(ImGui::Button(pickingDof?"Cancel pick":"Pick DOF")) {pickingDof=!pickingDof;if(pickingDof) showDofs=true;}
-        Tip("Pick a degree of freedom in the mesh to track its coefficient over time.");
-        nextAction("1D profile");
-        if(ImGui::Button("1D profile")) {profiles.OpenRay();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;}
-        nextAction("2D profile");
-        if(ImGui::Button("2D profile")) {profiles.OpenPlane();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;}
-        nextAction("Surface trace");
-        if(ImGui::Button("Surface trace")) {surfaceTrace.Open();profiles.SetMode(0);inspectorTab=1;plotTab=2;showPlots=true;}
-        nextAction("Tracks");
-        if(ImGui::Button("Tracks")) {inspectorTab=1;plotTab=1;showPlots=true;}
-        nextAction("Flow");
-        if(ImGui::Button("Flow")) {flow.Open();inspectorTab=0;}
-        nextAction("Plots", true);ImGui::Checkbox("Plots",&showPlots);
+        if(action(pickingDof?ICON_FA_XMARK "  Cancel pick###pick":ICON_FA_CROSSHAIRS "  Pick DOF###pick",pickingDof,
+                  pickingDof?"Stop picking (Esc)":"Pick a degree of freedom in the mesh to track its coefficient over time.",true)) {
+            pickingDof=!pickingDof;if(pickingDof) showDofs=true;
+        }
+        if(action(ICON_FA_RULER_HORIZONTAL "  1D profile",profiles.Mode()==1,"Sample the field along a ray. Drag the handles in the viewport.",true))
+            {profiles.OpenRay();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;}
+        if(action(ICON_FA_TABLE_CELLS "  2D profile",profiles.Mode()==2,"Sample the field across a plane as a heatmap."))
+            {profiles.OpenPlane();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;}
+        if(action(ICON_FA_GLOBE "  Surface trace",surfaceTrace.Enabled(),"Sample the field along a meridian or latitude of the outer surface."))
+            {surfaceTrace.Open();profiles.SetMode(0);inspectorTab=1;plotTab=2;showPlots=true;}
+        if(action(ICON_FA_CHART_LINE "  Tracks",false,"Show values tracked across frames."))
+            {inspectorTab=1;plotTab=1;showPlots=true;}
+        if(action(ICON_FA_WIND "  Flow",flow.Enabled(),"Show arrows or streamlines of a vector field."))
+            {flow.Open();inspectorTab=0;}
+        if(action(ICON_FA_SQUARE_POLL_VERTICAL "  Plots",showPlots,showPlots?"Hide the plot panel":"Show the plot panel",true))
+            showPlots=!showPlots;
         const float available=ImGui::GetContentRegionAvail().y;
         const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || tracking.HasTracks() || plotTab==1);
         const float plotHeight=plotVisible?std::clamp(available*0.40f,200.0f,320.0f):0;
@@ -765,7 +797,14 @@ private:
                 automaticColorRange=true;
         }
         if(gf) {ImGui::TextDisabled("%s",gf->FESpace()->FEColl()->Name());Tip("Finite element space of the selected field.");}
-        if(coloring==0 && gf && ImGui::CollapsingHeader("Color scale")) {
+        bool colorScaleOpen=false;
+        if(coloring==0 && gf) {
+            colorScaleOpen=ImGui::CollapsingHeader("Color scale");
+            std::string badge=colorScale.scale==RayFEM::ColorScale::Linear?"":RayFEM::ColorScaleName(colorScale.scale);
+            if(!automaticColorRange) badge+=badge.empty()?"Fixed":" · Fixed";
+            RayFEM::UI::HeaderBadge(badge.c_str());
+        }
+        if(colorScaleOpen) {
             ImGui::TextDisabled("Color map");ImGui::SetNextItemWidth(-1);
             if(ImGui::BeginCombo("##color_map",RayFEM::ColorMapName(static_cast<RayFEM::ColorMap>(colorMap)))) {
                 for(int i=0;i<RayFEM::ColorMapCount;++i)
@@ -832,7 +871,10 @@ private:
             }
         }
         ImGui::Spacing();
-        if(ImGui::CollapsingHeader("Regions",ImGuiTreeNodeFlags_DefaultOpen)) {
+        const bool regionsOpen=ImGui::CollapsingHeader("Regions",ImGuiTreeNodeFlags_DefaultOpen);
+        const std::string hiddenMaterials=excludedMaterials.empty()?"":std::to_string(excludedMaterials.size())+" hidden";
+        RayFEM::UI::HeaderBadge(hiddenMaterials.c_str());
+        if(regionsOpen) {
             const char* colors[]={"Field values","Material IDs","Boundary IDs"};
             ImGui::SetNextItemWidth(-1);ImGui::Combo("##coloring",&coloring,colors,3);
             if(ImGui::TreeNode("Materials")) {
@@ -890,12 +932,21 @@ private:
             }
         }
         flow.Controls();
-        if(frame->displacement && ImGui::CollapsingHeader("Deformation",ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool deformationOpen=false;
+        if(frame->displacement) {
+            deformationOpen=ImGui::CollapsingHeader("Deformation",ImGuiTreeNodeFlags_DefaultOpen);
+            char badge[32]="Off";
+            if(deform && displacementScale!=1) std::snprintf(badge,sizeof(badge),"×%.2f",displacementScale);
+            RayFEM::UI::HeaderBadge(deform && displacementScale==1?nullptr:badge);
+        }
+        if(deformationOpen) {
             ImGui::Checkbox("Apply displacement",&deform);
             ImGui::TextDisabled("Scale");ImGui::SetNextItemWidth(-1);
             ImGui::SliderFloat("##displacement_scale",&displacementScale,-2,3,"%.2f");
         }
-        if(ImGui::CollapsingHeader("Clipping")) {
+        const bool clippingOpen=ImGui::CollapsingHeader("Clipping");
+        RayFEM::UI::HeaderBadge(clip?"On":nullptr);
+        if(clippingOpen) {
             ImGui::Checkbox("Enable##clipping",&clip);
             const char* modes[]={"Cut elements","Whole elements"};
             ImGui::SetNextItemWidth(-1);ImGui::Combo("##clipmode",&clipMode,modes,2);
@@ -909,7 +960,6 @@ private:
             ImGui::TextDisabled("Normal");ImGui::SetNextItemWidth(-1);
             ImGui::DragFloat3("##clip_normal",&sliceNormal.x,0.01f,-1,1);
         }
-        if(!error.empty()) {ImGui::Spacing();ImGui::TextWrapped("%s",error.c_str());}
     }
 
     std::string TimelineLabel() const {
@@ -1036,6 +1086,8 @@ private:
         }
         if (hovered && IsKeyPressed(KEY_R) && active && active->vertices) {cameraAdjusted=false;FitCamera(active->bounds);}
         if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_HOME))HomeCamera();
+        if(pickingDof && !ImGui::IsAnyItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape,false) &&
+           !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))pickingDof=false;
         if(RayFEM::UpdateCameraViewTransition(camera,cameraTransition,GetTime()))cameraAdjusted=true;
         Vector3 normal=Vector3Normalize(sliceNormal);
         // The CPU cut includes the section cap. A second shader discard would
@@ -1183,11 +1235,109 @@ private:
             }
             if(coloring==2) draw->AddText({origin.x+16,y+3},RayFEM::UI::Palette().muted,"0: interior / cut");
         }
-        if(active && !active->vertices) draw->AddText({origin.x+22,origin.y+size.y/2},RayFEM::UI::Palette().muted,"No visible elements");
-        if (!Current()) draw->AddText({origin.x+22,origin.y+22},RayFEM::UI::Palette().muted,"Open a .serif archive or stream a mesh and frame.");
-        else if (!active) draw->AddText({origin.x+22,origin.y+22},RayFEM::UI::Palette().warning,"Choose a supported field operation in the left panel.");
+        DrawViewportMessages(active,origin,size,orientation);
         RayFEM::UI::DrawOrientationCube(camera,orientation.cube,mouse,hovered && !existingDrag);
         RayFEM::UI::DrawCameraRotationArrows(orientation,mouse,hovered && !existingDrag,rotationIcons);
+    }
+
+    // Text overlays on the viewport: active display states, the picking hint,
+    // errors, and empty-scene guidance. They stay visible on every tab.
+    void DrawViewportMessages(const ViewCache* active,ImVec2 origin,ImVec2 size,
+                              const RayFEM::UI::OrientationControlsLayout& orientation) {
+        auto* draw=ImGui::GetWindowDrawList();
+        const auto& palette=RayFEM::UI::Palette();
+        ImFont* font=ImGui::GetFont();
+        const float fontSize=ImGui::GetFontSize();
+        const float left=origin.x+(active && coloring!=0?162.0f:12.0f);
+        const float right=std::max(left+120,orientation.bounds.width>0?orientation.bounds.x-12:origin.x+size.x-12);
+        float y=origin.y+12;
+        auto count=[](std::size_t n,const char* singular,const char* plural) {
+            return std::to_string(n)+" "+(n==1?singular:plural);
+        };
+
+        struct Chip { std::string label; const char* tip; };
+        std::vector<Chip> chips;
+        if(const auto frame=Current()) {
+            if(clip) chips.push_back({ICON_FA_SCISSORS "  Clipped","Clipping is on. Change it under View > Clipping."});
+            if(coloring==0 && !automaticColorRange)
+                chips.push_back({ICON_FA_LOCK "  Fixed color range","Colors use fixed limits across frames. Change them under View > Color scale."});
+            if(!excludedMaterials.empty())
+                chips.push_back({ICON_FA_LAYER_GROUP "  "+count(excludedMaterials.size(),"material hidden","materials hidden"),
+                                 "Hidden materials are excluded from rendering and analysis. Change them under View > Regions > Materials."});
+            if(!elements.Hidden().empty())
+                chips.push_back({ICON_FA_EYE_SLASH "  "+count(elements.Hidden().size(),"element hidden","elements hidden"),
+                                 "Hidden elements are excluded from rendering and analysis. Show them again from the Elements tab."});
+            if(elementExplosion>0)
+                chips.push_back({ICON_FA_UP_RIGHT_AND_DOWN_LEFT_FROM_CENTER "  Exploded view",
+                                 "Elements are shrunk around their centers. Set Explode elements to zero under View > Appearance to restore the mesh."});
+            if(frame->displacement && !deform)
+                chips.push_back({"Displacement off","The reference geometry is shown. Turn on Apply displacement under View > Deformation."});
+            else if(frame->displacement && displacementScale!=1) {
+                char label[48];std::snprintf(label,sizeof(label),"Displacement ×%.2f",displacementScale);
+                chips.push_back({label,"Displacement is scaled. Change it under View > Deformation."});
+            }
+        }
+        const float chipHeight=fontSize+8,chipPadding=9;
+        float x=left;
+        for(const auto& chip:chips) {
+            const float width=ImGui::CalcTextSize(chip.label.c_str()).x+2*chipPadding;
+            if(x>left && x+width>right) {x=left;y+=chipHeight+6;}
+            const ImVec2 a{x,y},b{x+width,y+chipHeight};
+            draw->AddRectFilled(a,b,RayFEM::UI::WithAlpha(palette.plot_background,235),chipHeight*.5f);
+            draw->AddRect(a,b,palette.border,chipHeight*.5f);
+            draw->AddText({x+chipPadding,y+4},palette.text,chip.label.c_str());
+            if(ImGui::IsMouseHoveringRect(a,b) && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))
+                ImGui::SetTooltip("%s",chip.tip);
+            x+=width+6;
+        }
+        if(!chips.empty()) y+=chipHeight+8;
+
+        // A tinted, wrapped message box spanning the free width at the top.
+        auto banner=[&](const char* icon,const char* text,ImU32 tone) {
+            const float padding=10,iconWidth=icon?ImGui::CalcTextSize(icon).x+8:0;
+            const float wrap=std::max(40.0f,right-left-2*padding-iconWidth);
+            const ImVec2 textSize=font->CalcTextSizeA(fontSize,FLT_MAX,wrap,text);
+            const ImVec2 a{left,y},b{std::min(right,left+textSize.x+iconWidth+2*padding),y+textSize.y+2*7};
+            draw->AddRectFilled(a,b,RayFEM::UI::WithAlpha(palette.plot_background,240),RayFEM::UI::OverlayRounding);
+            draw->AddRectFilled(a,b,RayFEM::UI::WithAlpha(tone,40),RayFEM::UI::OverlayRounding);
+            draw->AddRect(a,b,RayFEM::UI::WithAlpha(tone,160),RayFEM::UI::OverlayRounding);
+            if(icon)draw->AddText({left+padding,y+7},tone,icon);
+            draw->AddText(font,fontSize,{left+padding+iconWidth,y+7},palette.text,text,nullptr,wrap);
+            y=b.y+8;
+        };
+        if(pickingDof)
+            banner(ICON_FA_CROSSHAIRS,"Click a DOF marker to track its coefficient.  Press Esc or Cancel pick to stop.",palette.accent);
+        if(!error.empty()) banner(ICON_FA_TRIANGLE_EXCLAMATION,error.c_str(),palette.warning);
+        if(Current() && !active)
+            banner(error.empty()?ICON_FA_TRIANGLE_EXCLAMATION:nullptr,"Choose a supported field operation in the View tab.",palette.warning);
+
+        // Centered guidance for an empty viewport.
+        auto centered=[&](std::initializer_list<std::pair<std::string,ImU32>> lines) {
+            const float lineHeight=fontSize+6;
+            float lineY=origin.y+size.y*.5f-lineHeight*lines.size()*.5f;
+            float widest=0;
+            for(const auto& line:lines) widest=std::max(widest,ImGui::CalcTextSize(line.first.c_str()).x);
+            const ImVec2 center{origin.x+size.x*.5f,origin.y+size.y*.5f};
+            const ImVec2 half{widest*.5f+18,lineHeight*lines.size()*.5f+12};
+            draw->AddRectFilled({center.x-half.x,center.y-half.y},{center.x+half.x,center.y+half.y},
+                                RayFEM::UI::WithAlpha(palette.plot_background,235),RayFEM::UI::OverlayRounding);
+            for(const auto& [text,color]:lines) {
+                const float width=ImGui::CalcTextSize(text.c_str()).x;
+                draw->AddText({origin.x+(size.x-width)*.5f,lineY},color,text.c_str());
+                lineY+=lineHeight;
+            }
+        };
+        if(!Current()) {
+            const std::string stream="Stream frames to "+opts.listen+":"+std::to_string(opts.port);
+            if(RayFEM::SerifLoadingAvailable())
+                centered({{ICON_FA_FOLDER_OPEN "  No data yet",palette.text},
+                          {"Open a .serif archive (Ctrl/Cmd+O) or drop one here,",palette.muted},
+                          {"or s"+stream.substr(1)+".",palette.muted}});
+            else
+                centered({{ICON_FA_TOWER_BROADCAST "  Waiting for frames",palette.text},{stream+".",palette.muted}});
+        } else if(active && !active->vertices)
+            centered({{ICON_FA_EYE_SLASH "  No visible elements",palette.text},
+                      {"Check hidden materials, hidden elements, or the clipping plane.",palette.muted}});
     }
 
     void DrawReferencePlane(const RayFEM::ReferencePlaneLayout& grid) const {

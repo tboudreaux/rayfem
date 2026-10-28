@@ -81,7 +81,10 @@ public:
 
     void Controls() {
         ImGui::PushID("Vector flow controls");
-        if(!ImGui::CollapsingHeader("Vector flow",ImGuiTreeNodeFlags_DefaultOpen)) {ImGui::PopID();return;}
+        const bool open=ImGui::CollapsingHeader("Vector flow",ImGuiTreeNodeFlags_DefaultOpen);
+        constexpr const char* modeNames[]={nullptr,"Arrows","Streamlines","Both"};
+        RayFEM::UI::HeaderBadge(modeNames[std::clamp(mode,0,3)]);
+        if(!open) {ImGui::PopID();return;}
         ImGui::SetNextItemWidth(-1);
         ImGui::Combo("##mode",&mode,"Off\0Arrows\0Streamlines\0Arrows + streamlines\0");
         Tip("Show directions or streamlines throughout the vector field.");

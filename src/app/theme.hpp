@@ -86,6 +86,35 @@ inline ImVec4 ThemeText(ImU32 color){return ImGui::ColorConvertU32ToFloat4(color
 inline ImU32 ThemeSeriesColor(std::size_t index){const auto& colors=Palette().series;return colors[index%colors.size()];}
 inline Color ThemeAlpha(Color color,unsigned char alpha){color.a=alpha;return color;}
 
+inline ImU32 WithAlpha(ImU32 color,unsigned char alpha){return (color&~IM_COL32_A_MASK)|(ImU32(alpha)<<IM_COL32_A_SHIFT);}
+
+// A button that stays tinted with the accent color while its mode is on.
+inline bool ToggleButton(const char* label,bool active,ImVec2 size={0,0}) {
+    if(active) {
+        const auto accent=Palette().accent;
+        ImGui::PushStyleColor(ImGuiCol_Button,WithAlpha(accent,72));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,WithAlpha(accent,104));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,WithAlpha(accent,136));
+    }
+    const bool pressed=ImGui::Button(label,size);
+    if(active)ImGui::PopStyleColor(3);
+    return pressed;
+}
+
+// Right-aligned pill on the previous item, normally a collapsing header, so a
+// section's state remains visible while it is collapsed.
+inline void HeaderBadge(const char* text) {
+    if(!text || !*text)return;
+    const ImVec2 min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
+    const ImVec2 textSize=ImGui::CalcTextSize(text);
+    const float padding=7,height=textSize.y+4;
+    const float right=max.x-ImGui::GetStyle().FramePadding.x;
+    const ImVec2 a{right-textSize.x-2*padding,(min.y+max.y-height)*.5f},b{right,a.y+height};
+    auto* draw=ImGui::GetWindowDrawList();
+    draw->AddRectFilled(a,b,WithAlpha(Palette().accent,48),height*.5f);
+    draw->AddText({a.x+padding,a.y+2},Palette().accent,text);
+}
+
 // Reset only colors. User font size, spacing, rounding and docking layout stay
 // untouched, and a new ImGui context can reapply the selected theme.
 inline void ApplyTheme(ThemeMode mode) {

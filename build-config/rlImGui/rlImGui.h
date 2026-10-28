@@ -97,6 +97,13 @@ RLIMGUIAPI void rlImGuiShutdown(void);
 // Advanced StartupAPI
 
 /// <summary>
+/// Merge the Font Awesome icons into the most recently added font, so a custom
+/// application font can show ICON_FA_* glyphs. Call after adding that font.
+/// </summary>
+/// <param name="size">icon size in pixels</param>
+RLIMGUIAPI void rlImGuiMergeFontAwesome(float size);
+
+/// <summary>
 /// Custom initialization. Not needed if you call rlImGuiSetup. Only needed if you want to add custom setup code.
 /// must be followed by rlImGuiEndInitImGui
 /// Called by ImGui_ImplRaylib_Init, and does the first part of setup, before fonts are rendered

@@ -264,7 +264,7 @@ static void SetupMouseCursors(void)
     MouseCursorMap[ImGuiMouseCursor_NotAllowed] = MOUSE_CURSOR_NOT_ALLOWED;
 }
 
-void SetupFontAwesome(void)
+static void MergeFontAwesome(float size)
 {
 #ifndef NO_FONT_AWESOME
     static const ImWchar icons_ranges[] = { ICON_MIN_FA, ICON_MAX_FA, 0 };
@@ -282,7 +282,6 @@ void SetupFontAwesome(void)
 
     ImGuiIO& io = ImGui::GetIO();
 
-    float size = FONT_AWESOME_ICON_SIZE;
 #if !defined(__APPLE__)
     if (!IsWindowState(FLAG_WINDOW_HIGHDPI))
         size *= GetDisplayScale().y;
@@ -291,8 +290,20 @@ void SetupFontAwesome(void)
 #endif
 
     io.Fonts->AddFontFromMemoryCompressedTTF((void*)fa_solid_900_compressed_data, fa_solid_900_compressed_size, size, &icons_config, icons_ranges);
+#else
+    (void)size;
 #endif
 
+}
+
+void SetupFontAwesome(void)
+{
+    MergeFontAwesome(FONT_AWESOME_ICON_SIZE);
+}
+
+void rlImGuiMergeFontAwesome(float size)
+{
+    MergeFontAwesome(size);
 }
 
 void SetupBackend(void)
