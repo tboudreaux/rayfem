@@ -28,6 +28,7 @@
 #include "libRayfem/io/serif.hpp"
 #include "file_dialog.hpp"
 #include "frame_pipeline.hpp"
+#include "indexed_surface.hpp"
 #include "theme.hpp"
 #include "profile_panel.hpp"
 #include "camera_controller.hpp"
@@ -112,7 +113,8 @@ struct ViewCache {
     std::uint64_t selectionRevision=UINT64_MAX;
     std::size_t selectionVertices=0;
     std::string appearance;
-    std::vector<double> values;
+    RayFEM::UI::IndexedSurface surface;  // per-vertex values and triangle ranges; GPU holds the rest
+    std::size_t gpuVertices = 0;
     std::vector<double> rangeDistribution;
     BoundingBox bounds{};
     double min = 0, max = 0, build_ms = 0;
@@ -398,7 +400,7 @@ private:
 
     void TrimViewCache() {
         auto bytes=[](const ViewCache& entry) {
-            return entry.vertices*72+entry.boundaries.size()*464+entry.picker.StorageBytes()+entry.selectionVertices*64+
+            return entry.gpuVertices*48+entry.vertices*2+entry.boundaries.size()*464+entry.picker.StorageBytes()+entry.selectionVertices*64+
                 entry.dofs.size()*sizeof(RayFEM::DofPoint);
         };
         std::size_t total=0;
@@ -425,15 +427,16 @@ private:
             const auto mapping=automaticColorRange ?
                 RayFEM::ResolveColorScale(entry.volumeMin,entry.volumeMax,colorScale,entry.rangeDistribution) :
                 RayFEM::ResolveColorScale(colorMinimum,colorMaximum,colorScale);
-            if(entry.model.meshCount) {
-                auto& mesh=entry.model.meshes[0];
-                for(std::size_t i=0;i<entry.values.size();++i) {
-                    const auto color=RayFEM::FieldColor(entry.values[i],mapping,
+            for(int c=0;c<entry.model.meshCount && c<int(entry.surface.chunks.size());++c) {
+                auto& mesh=entry.model.meshes[c];
+                const auto& values=entry.surface.chunks[c].values;
+                for(std::size_t i=0;i<values.size();++i) {
+                    const auto color=RayFEM::FieldColor(values[i],mapping,
                         static_cast<RayFEM::ColorMap>(colorMap),reverseColors);
                     mesh.colors[4*i]=color.r;mesh.colors[4*i+1]=color.g;
                     mesh.colors[4*i+2]=color.b;mesh.colors[4*i+3]=color.a;
                 }
-                UpdateMeshBuffer(mesh,3,mesh.colors,static_cast<int>(entry.values.size()*4),0);
+                UpdateMeshBuffer(mesh,3,mesh.colors,static_cast<int>(values.size()*4),0);
             }
             entry.colorMapping=mapping;entry.min=mapping.minimum;entry.max=mapping.maximum;
         }
@@ -472,7 +475,12 @@ private:
                 if (newest) {error=result->error;failedKey=result->request.key+result->request.appearance;}
                 continue;
             }
-            if (std::find(frames.begin(),frames.end(),result->request.frame)==frames.end()) continue;
+            // A frame can leave a short history while its surface is built.
+            // Still show it when it is newer than the surface on screen.
+            const bool retained=std::find(frames.begin(),frames.end(),result->request.frame)!=frames.end();
+            const bool newer=cache.empty() || result->request.frame->metadata.frame_index>cache.back().frame->metadata.frame_index ||
+                result->request.frame->mesh_revision!=cache.back().frame->mesh_revision;
+            if (!retained && !newer) continue;
             try {FinishEntry(*result);}
             catch(const std::exception& e) {error=e.what();}
             if (newest) {error.clear();failedKey.clear();}
@@ -487,13 +495,21 @@ private:
         entry.clipping=request.clipping; entry.refinement=request.refinement; entry.displacement=request.displacement;
         entry.appearance=request.appearance;
         entry.bounds=data.bounds; entry.min=data.min_value; entry.max=data.max_value;
-        entry.vertices=data.positions.size()/3;
+        entry.vertices=result.vertex_count;
         entry.boundaries=std::move(result.boundaries); entry.boundaries_ready=result.boundaries_ready;
         entry.retainedElements=std::move(result.retained);
         entry.dofs=std::move(result.dofs); entry.dofs_ready=result.dofs_ready;
-        if(!data.positions.empty()) {
-            entry.model=RayFEM::UploadSurface(data);
+        if(result.vertex_count) {
+            entry.model=RayFEM::UI::UploadIndexedSurface(result.indexed);
+            entry.gpuVertices=result.indexed.vertices;
             entry.picker=std::move(result.picker);
+            // The GPU meshes keep positions, normals, colors and indices.
+            entry.surface=std::move(result.indexed);
+            for(auto& chunk:entry.surface.chunks) {
+                std::vector<float>().swap(chunk.positions);std::vector<float>().swap(chunk.normals);
+                std::vector<unsigned char>().swap(chunk.colors);std::vector<unsigned short>().swap(chunk.indices);
+                if(!result.has_range)std::vector<double>().swap(chunk.values);
+            }
         }
         if(result.has_range) {
             entry.colorMapping=result.mapping;
@@ -502,7 +518,6 @@ private:
             entry.rangeBudgetLimited=result.budget_limited;
             entry.rangeSkippedElements=result.skipped_elements;
             entry.rangeDistribution=std::move(result.distribution);
-            entry.values=std::move(data.values);
             entry.hasFieldRange=true;
         }
         for (int i=0;i<entry.model.materialCount;++i) entry.model.materials[i].shader=shader;
@@ -591,15 +606,18 @@ private:
         entry.selectionRevision=elements.Revision();
         if(!entry.model.meshCount || elements.Selected().empty()) return;
         RayFEM::SurfaceData overlay;
-        const auto& source=entry.model.meshes[0];
         std::size_t triangles=0;
         for(int id:elements.Selected())triangles+=entry.picker.TrianglesForElement(id).size();
         overlay.positions.reserve(triangles*9);overlay.normals.reserve(triangles*9);
         overlay.colors.reserve(triangles*12);
         for(int id:elements.Selected()) for(auto triangle:entry.picker.TrianglesForElement(id)) {
-            const auto offset=std::size_t(triangle)*9;
-            overlay.positions.insert(overlay.positions.end(),source.vertices+offset,source.vertices+offset+9);
-            overlay.normals.insert(overlay.normals.end(),source.normals+offset,source.normals+offset+9);
+            const auto [chunk,local]=entry.surface.Locate(triangle);
+            const auto& source=entry.model.meshes[chunk];
+            for(int corner=0;corner<3;++corner) {
+                const std::size_t vertex=source.indices[3*local+corner];
+                overlay.positions.insert(overlay.positions.end(),source.vertices+3*vertex,source.vertices+3*vertex+3);
+                overlay.normals.insert(overlay.normals.end(),source.normals+3*vertex,source.normals+3*vertex+3);
+            }
             for(int vertex=0;vertex<3;++vertex)
                 overlay.colors.insert(overlay.colors.end(),{255,189,60,150});
         }

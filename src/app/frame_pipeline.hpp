@@ -1,6 +1,7 @@
 #pragma once
 
 #include "element_picker.hpp"
+#include "indexed_surface.hpp"
 #include "libRayfem/frame/render.hpp"
 #include "libRayfem/mesh/clipping.hpp"
 #include "libRayfem/mesh/color_scale.hpp"
@@ -143,7 +144,10 @@ struct SurfaceRequest {
 
 struct SurfaceResult {
     SurfaceRequest request;
+    // Bounds, limits and counts only; the vertex data moves into indexed.
     SurfaceData data;
+    IndexedSurface indexed;
+    std::size_t vertex_count = 0;
     std::vector<LineSegment> boundaries;
     bool boundaries_ready = false;
     std::vector<bool> retained;
@@ -359,6 +363,13 @@ private:
             }
             if (!result.data.positions.empty())
                 result.picker.Build(result.data.positions, result.data.element_ids);
+            result.vertex_count = result.data.positions.size()/3;
+            result.indexed = WeldSurface(result.data);
+            auto& data = result.data;
+            for (auto* buffer : {&data.positions, &data.normals}) std::vector<float>().swap(*buffer);
+            std::vector<unsigned char>().swap(data.colors);
+            std::vector<double>().swap(data.values);
+            for (auto* buffer : {&data.material_ids, &data.boundary_ids, &data.element_ids}) std::vector<int>().swap(*buffer);
         } catch (const std::exception& e) { result.error = e.what(); }
         result.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         result.request = std::move(request);
