@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
@@ -135,6 +136,43 @@ bool Invert(mfem::Mesh& mesh, int element, const ProfilePosition& position,
     return converged();
 }
 
+// Padded bounds of each included element, from a dense sample of its mapped
+// geometry. Inverse maps are only attempted where a point is inside the box,
+// so points outside the mesh no longer cost a Newton solve per element. The
+// padding covers curved bulges between the sampled points.
+struct ElementBox { ProfilePosition low{}, high{}; };
+std::vector<ElementBox> ElementBoxes(mfem::Mesh& mesh, const std::vector<bool>& included) {
+    std::vector<ElementBox> boxes(mesh.GetNE());
+    const int order = mesh.GetNodes() ? std::max(1, mesh.GetNodalFESpace()->GetMaxElementOrder()) : 1;
+    mfem::GeometryRefiner refiner;
+    mfem::Vector physical;
+    for (int e = 0; e < mesh.GetNE(); ++e) {
+        if (!included[e]) { continue; }
+        auto& box = boxes[e];
+        box.low.fill(std::numeric_limits<double>::infinity());
+        box.high.fill(-std::numeric_limits<double>::infinity());
+        auto& transform = *mesh.GetElementTransformation(e);
+        const auto* refined = refiner.Refine(mesh.GetElementBaseGeometry(e), order + 2, 1);
+        for (int j = 0; j < refined->RefPts.GetNPoints(); ++j) {
+            transform.Transform(refined->RefPts.IntPoint(j), physical);
+            for (int d = 0; d < 3; ++d) {
+                const double x = d < physical.Size() ? physical[d] : 0;
+                box.low[d] = std::min(box.low[d], x); box.high[d] = std::max(box.high[d], x);
+            }
+        }
+        const double diagonal = std::hypot(box.high[0]-box.low[0], box.high[1]-box.low[1], box.high[2]-box.low[2]);
+        double magnitude = 1;
+        for (int d = 0; d < 3; ++d) { magnitude = std::max({magnitude, std::abs(box.low[d]), std::abs(box.high[d])}); }
+        const double pad = .25*diagonal + 1e-12*magnitude;
+        for (int d = 0; d < 3; ++d) { box.low[d] -= pad; box.high[d] += pad; }
+    }
+    return boxes;
+}
+bool Contains(const ElementBox& box, const ProfilePosition& p) {
+    for (int d = 0; d < 3; ++d) { if (p[d] < box.low[d] || p[d] > box.high[d]) { return false; } }
+    return true;
+}
+
 class InverseProfileAlgorithm final : public RayFEM::ProfileAlgorithm {
 public:
     explicit InverseProfileAlgorithm(bool coherent) : coherent_(coherent) {}
@@ -170,7 +208,9 @@ public:
         mfem::Mesh& displayed = displaced ? *displaced : mesh;
         const auto* neighbors = coherent_ ? &displayed.ElementToElementTable() : nullptr;
         std::vector<ProfilePosition> centers;
+        std::vector<ElementBox> boxes;
         if (coherent_) {
+            boxes = ElementBoxes(displayed, included);
             centers.resize(displayed.GetNE());
             for (int e = 0; e < displayed.GetNE(); ++e) {
                 if (!included[e]) { continue; }
@@ -206,7 +246,7 @@ public:
                 const int* adjacent = neighbors->GetRow(previous);
                 for (int j = 0; j < neighbors->RowSize(previous); ++j) {
                     const int e = adjacent[j];
-                    if (!included[e]) { continue; }
+                    if (!included[e] || !Contains(boxes[e], point.position)) { continue; }
                     if (!Invert(displayed, e, point.position, reference)) { continue; }
                     if (mfem::Geometry::CheckPoint(displayed.GetElementBaseGeometry(e), reference, -1e-8)) { found = e; }
                     else { boundary_candidate = true; }
@@ -221,7 +261,7 @@ public:
                 std::vector<std::pair<double, int>> candidates;
                 candidates.reserve(centers.size());
                 for (int e = 0; e < displayed.GetNE(); ++e) {
-                    if (!included[e]) { continue; }
+                    if (!included[e] || !Contains(boxes[e], point.position)) { continue; }
                     candidates.emplace_back(std::hypot(centers[e][0]-point.position[0],
                                                        centers[e][1]-point.position[1],
                                                        centers[e][2]-point.position[2]), e);
@@ -238,7 +278,7 @@ public:
             }
             if (found < 0 && !searched_all) {
                 for (int e = 0; e < displayed.GetNE(); ++e) {
-                    if (!included[e]) { continue; }
+                    if (!included[e] || (coherent_ && !Contains(boxes[e], point.position))) { continue; }
                     if (Invert(displayed, e, point.position, reference)) { found = e; break; }
                 }
             }
@@ -296,12 +336,7 @@ std::vector<ProfileSample> MakeRaySamples(ProfilePosition origin, ProfilePositio
     return samples;
 }
 
-std::vector<ProfileSample> MakePlaneSamples(ProfilePosition center, ProfilePosition normal,
-                                            double width, double height, int columns, int rows) {
-    if (!Finite(center) || !std::isfinite(width) || !std::isfinite(height) || width <= 0 || height <= 0 ||
-        columns < 2 || rows < 2 || static_cast<std::int64_t>(columns)*rows > 1000000) {
-        throw std::invalid_argument("Plane requires finite coordinates, positive finite extents, and a grid of 2 by 2 to 1000000 samples");
-    }
+std::array<ProfilePosition, 2> PlaneAxes(ProfilePosition normal) {
     normal = Normalize(normal);
     ProfilePosition helper{};
     // Prefer y on ties, giving u=x and v=y for the usual z-normal plane.
@@ -309,7 +344,16 @@ std::vector<ProfileSample> MakePlaneSamples(ProfilePosition center, ProfilePosit
     else if (std::abs(normal[0]) <= std::abs(normal[2])) { helper[0] = 1; }
     else { helper[2] = 1; }
     const auto u_axis = Normalize(Cross(helper, normal));
-    const auto v_axis = Cross(normal, u_axis);
+    return {u_axis, Cross(normal, u_axis)};
+}
+
+std::vector<ProfileSample> MakePlaneSamples(ProfilePosition center, ProfilePosition normal,
+                                            double width, double height, int columns, int rows) {
+    if (!Finite(center) || !std::isfinite(width) || !std::isfinite(height) || width <= 0 || height <= 0 ||
+        columns < 2 || rows < 2 || static_cast<std::int64_t>(columns)*rows > 1000000) {
+        throw std::invalid_argument("Plane requires finite coordinates, positive finite extents, and a grid of 2 by 2 to 1000000 samples");
+    }
+    const auto [u_axis, v_axis] = PlaneAxes(normal);
     std::vector<ProfileSample> samples(static_cast<std::size_t>(columns)*rows);
     for (int row = 0; row < rows; ++row) {
         for (int column = 0; column < columns; ++column) {

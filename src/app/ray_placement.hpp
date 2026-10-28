@@ -171,8 +171,9 @@ inline std::optional<RayAnchor> PickElementSurface(const ElementSurface& surface
 class RayPlacement {
 public:
     // Ray: a start and an end on any element face. Path: any number of points
-    // on outer faces. Center: one click, the element's center.
-    enum class Kind { Ray, Path, Center };
+    // on outer faces. Center: one click, the element's center. Point: one
+    // point on any element face (the 2D profile's plane center).
+    enum class Kind { Ray, Path, Center, Point };
     enum class Step { Idle, ChooseElement, PlacePoint };
     // A path reports each confirmed point (partial) so it can be traced while
     // placing; cancelled asks the owner to restore the path it had before.
@@ -191,7 +192,7 @@ public:
     const std::string& Message() const { return message; }
 
     void Begin(Kind what = Kind::Ray) {
-        Close(); kind = what; anchors.assign(what == Kind::Ray ? 2 : 0, RayAnchor{});
+        Close(); kind = what; anchors.assign(what == Kind::Ray ? 2 : what == Kind::Point ? 1 : 0, RayAnchor{});
         endpoint = 0; single = false; message.clear(); step = Step::ChooseElement;
     }
     // Re-place one point, opening its element directly. A point index past the
@@ -271,7 +272,8 @@ public:
             ImGui::SetNextWindowSize(windowSize, ImGuiCond_Appearing);
         }
         ImGui::SetNextWindowSizeConstraints({300, 320}, {std::max(300.0f, viewportSize.x), std::max(320.0f, viewportSize.y)});
-        const std::string what = kind == Kind::Ray ? (endpoint == 0 ? "Ray start" : "Ray end") : "Path point " + std::to_string(endpoint + 1);
+        const std::string what = kind == Kind::Ray ? (endpoint == 0 ? "Ray start" : "Ray end") :
+                                 kind == Kind::Point ? "Plane center" : "Path point " + std::to_string(endpoint + 1);
         const std::string title = what + "  ·  element " + std::to_string(element) + "###ray placement";
         std::optional<Result> result;
         bool open = true;
@@ -294,7 +296,7 @@ public:
                 ImGui::TextDisabled("Click an outer face to place point %d. Drag to orbit, scroll to zoom. The faint lines are the rest of the mesh.", endpoint + 1);
             else
                 ImGui::TextDisabled("Click the surface to place the %s. Drag to orbit, scroll to zoom. The faint lines are the rest of the mesh.",
-                                    endpoint == 0 ? "start" : "end");
+                                    kind == Kind::Point ? "plane center" : endpoint == 0 ? "start" : "end");
             ImGui::PopTextWrapPos();
             ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - expandWidth);
             if (ImGui::Button(expandLabel, {expandWidth, 0})) resize = true;
@@ -324,6 +326,7 @@ public:
                 if (single) { step = Step::Idle; result = Result{kind, anchors, placed}; }
                 else if (kind == Kind::Ray && endpoint == 0) { endpoint = 1; step = Step::ChooseElement; }
                 else if (kind == Kind::Ray) { step = Step::Idle; result = Result{kind, anchors, -1}; }
+                else if (kind == Kind::Point) { step = Step::Idle; result = Result{kind, anchors, 0}; }
                 else { endpoint = int(anchors.size()); step = Step::ChooseElement; result = Result{kind, anchors, placed, true}; }
             }
         }
@@ -335,18 +338,15 @@ public:
     // Marks already-placed endpoints in the main view.
     template<class Project> void DrawMainMarkers(ImDrawList* draw, mfem::Mesh& mesh, const RenderOptions& options, Project&& project) const {
         if (!Active() || kind == Kind::Path) return;
-        ImVec2 previous{};
-        bool hasPrevious = false;
         for (int i = 0; i < int(anchors.size()); ++i) {
-            if (!anchors[i].Valid() || i == endpoint) { hasPrevious = false; continue; }
+            if (!anchors[i].Valid() || i == endpoint) continue;
             const auto position = AnchorPosition(mesh, anchors[i], options);
             ImVec2 screen;
-            if (!position || !project(*position, screen)) { hasPrevious = false; continue; }
+            if (!position || !project(*position, screen)) continue;
             draw->AddCircleFilled(screen, 6, Palette().guide);
             draw->AddCircle(screen, 9, Palette().handle_outline, 0, 2);
             const std::string label = kind == Kind::Ray ? (i == 0 ? "Start" : "End") : std::to_string(i + 1);
             draw->AddText({screen.x + 12, screen.y - 8}, Palette().guide_text, label.c_str());
-            previous = screen; hasPrevious = true;
         }
     }
 

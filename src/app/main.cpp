@@ -770,8 +770,14 @@ private:
         elements.Context(frame);
         profiles.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
         if(const auto request=profiles.TakePlacementRequest()) {
-            if(*request<0)rayPlacement.Begin();else rayPlacement.Edit(*request,profiles.Anchors());
+            using Kind=RayFEM::UI::RayPlacement::Kind;
+            if(*request==ProfilePanel::PlaneCenterRequest) {
+                if(profiles.CenterAnchor().Valid())rayPlacement.Edit(Kind::Point,0,{profiles.CenterAnchor()});
+                else rayPlacement.Begin(Kind::Point);
+            } else if(*request<0)rayPlacement.Begin();
+            else rayPlacement.Edit(*request,profiles.Anchors());
         }
+        SyncProfileClipping();
         if(const auto request=surfaceTrace.TakePlacementRequest()) {
             using Kind=RayFEM::UI::RayPlacement::Kind;
             if(request->kind==Kind::Path && request->index>=0)rayPlacement.Edit(Kind::Path,request->index,surfaceTrace.PathPoints());
@@ -888,6 +894,18 @@ private:
         DrawRayPlacement();
     }
 
+    // While the 2D profile cuts the mesh, the clipping plane follows it; the
+    // user's own clipping settings come back when it stops.
+    void SyncProfileClipping() {
+        if(profiles.ClipsMesh()) {
+            if(!profileClipping){savedClip=clip;savedSlicePoint=slicePoint;savedSliceNormal=sliceNormal;profileClipping=true;}
+            const Vector3 n=profiles.PlaneNormal();
+            if(std::isfinite(n.x) && Vector3Length(n)>0){clip=true;slicePoint=profiles.PlaneCenter();sliceNormal=n;}
+        } else if(profileClipping) {
+            clip=savedClip;slicePoint=savedSlicePoint;sliceNormal=savedSliceNormal;profileClipping=false;
+        }
+    }
+
     // The element viewer for ray endpoints, as its own window over the viewport.
     void DrawRayPlacement() {
         if(!rayPlacement.Active())return;
@@ -922,6 +940,9 @@ private:
             if(result->kind==RayFEM::UI::RayPlacement::Kind::Ray) {
                 if(result->anchors.size()==2) profiles.SetAnchors({result->anchors[0],result->anchors[1]});
                 if(!profiles.Enabled())profiles.OpenRay();
+                plotTab=0;
+            } else if(result->kind==RayFEM::UI::RayPlacement::Kind::Point) {
+                if(!result->anchors.empty())profiles.SetCenterAnchor(result->anchors.front());
                 plotTab=0;
             } else {
                 surfaceTrace.ApplyPlacement(*result);
@@ -1134,6 +1155,11 @@ private:
             }
         }
         if(RayFEM::UI::BeginSection("Clipping",clip?"On":nullptr,false)) {
+            if(profileClipping)
+                ImGui::TextColored(RayFEM::UI::ThemeText(RayFEM::UI::Palette().accent),ICON_FA_LINK "  Following the 2D profile plane");
+            if(profileClipping && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                ImGui::SetTooltip("Turn off Cut the mesh here in the 2D profile to edit clipping again.");
+            ImGui::BeginDisabled(profileClipping);
             RayFEM::UI::Switch("Enable##clipping",&clip);
             RayFEM::UI::Segmented("##clipmode",&clipMode,{"Cut elements","Whole elements"});
             if(clipMode==0)
@@ -1164,6 +1190,7 @@ private:
                 if(ImGui::Button(ICON_FA_CROSSHAIRS "  Through view center",{-1,0}))slicePoint=camera.target;
                 Tip("Move the plane through the point the camera orbits around.");
             }
+            ImGui::EndDisabled();
             RayFEM::UI::EndSection();
         }
         flow.Controls();
@@ -1549,8 +1576,6 @@ private:
         std::vector<Chip> chips;
         if(!server.receiving())
             chips.push_back({ICON_FA_PAUSE "  Stream paused","New frames are skipped. Resume from the status at the top right or the Info menu."});
-        if(active && surfaceBuilding)
-            chips.push_back({ICON_FA_ARROWS_ROTATE "  Updating","The last finished surface is shown while the current frame and settings are built."});
         if(const auto frame=Current()) {
             if(clip) chips.push_back({ICON_FA_SCISSORS "  Clipped","Clipping is on. Change it under View > Clipping."});
             if(coloring==0 && !automaticColorRange)
@@ -1586,6 +1611,18 @@ private:
         }
         if(!chips.empty()) y+=chipHeight+8;
 
+        // Rebuilds over a shown surface get a small corner spinner, only once
+        // they last long enough to notice, so streaming does not flicker it.
+        if(active && surfaceBuilding) {if(buildingSince<0)buildingSince=GetTime();}
+        else buildingSince=-1;
+        if(buildingSince>=0 && GetTime()-buildingSince>.25) {
+            const ImVec2 center{origin.x+size.x-18,origin.y+size.y-18};
+            RayFEM::UI::DrawSpinner(draw,center,6,palette.muted,GetTime());
+            if(ImGui::IsMouseHoveringRect({center.x-10,center.y-10},{center.x+10,center.y+10}) &&
+               !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))
+                ImGui::SetTooltip("Updating. The last finished surface is shown while the current frame and settings are built.");
+        }
+
         // A tinted, wrapped message box spanning the free width at the top.
         auto banner=[&](const char* icon,const char* text,ImU32 tone) {
             const float padding=10,iconWidth=icon?ImGui::CalcTextSize(icon).x+8:0;
@@ -1603,6 +1640,7 @@ private:
             using Kind=RayFEM::UI::RayPlacement::Kind;
             std::string text;
             if(rayPlacement.Placing()==Kind::Center) text="Click the element whose center becomes the path center. Esc to cancel.";
+            else if(rayPlacement.Placing()==Kind::Point) text="Click the element where the plane center goes. Esc to cancel.";
             else if(rayPlacement.Placing()==Kind::Path)
                 text="Click an element on the surface for path point "+std::to_string(rayPlacement.Endpoint()+1)+
                      (rayPlacement.Single()?". Esc to cancel.":". Finish below when done; Esc to cancel.");
@@ -1800,6 +1838,9 @@ private:
     bool automaticDetail=true;
     std::string fieldName,error,failedKey,requestedKey;
     bool surfaceBuilding=false;
+    double buildingSince=-1;
+    bool profileClipping=false,savedClip=false;
+    Vector3 savedSlicePoint{},savedSliceNormal{1,0,0};
     bool follow=true,playing=false,wireframe=false,showSurface=true,showBoundaries=true,showDofs=false,deform=true,clip=false,planeGuide=false;
     bool cameraAdjusted=false;
     bool keepReferencePlane=false;

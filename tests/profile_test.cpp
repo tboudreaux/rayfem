@@ -49,6 +49,14 @@ void GeometryRequests() {
         min_v=std::min(min_v,sample.v);max_v=std::max(max_v,sample.v);
     }
     Near(max_u-min_u,.8,1e-12,"Plane width"); Near(max_v-min_v,.6,1e-12,"Plane height");
+    {
+        // The exposed basis is the one the grid uses, so handles sit on it.
+        const auto [u_axis, v_axis] = RayFEM::PlaneAxes({1,2,3});
+        for (const auto& sample : plane) for (int d = 0; d < 3; ++d)
+            Near(sample.position[d], .5 + sample.u*u_axis[d] + sample.v*v_axis[d], 1e-12, "Plane axes match the sample grid");
+        const auto [x_axis, y_axis] = RayFEM::PlaneAxes({0,0,5});
+        Near(x_axis[0], 1, 1e-15, "Z-normal plane u is x"); Near(y_axis[1], 1, 1e-15, "Z-normal plane v is y");
+    }
     Reject([] { RayFEM::MakeRaySamples({0,0,0},{0,0,0},1,4); }, "Zero ray direction must reject");
     Reject([] { RayFEM::MakePlaneSamples({0,0,0},{0,0,0},1,1,4,4); }, "Zero plane normal must reject");
     Reject([] { RayFEM::MakeRaySamples({0,0,0},{1,0,0},-1,4); }, "Negative ray length must reject");
@@ -109,6 +117,20 @@ void AnalyticCases(RayFEM::ProfileRegistry& registry, int dim, bool curved) {
         const auto plane=RayFEM::MakePlaneSamples({.5,.5,dim==3?.5:0},{0,0,1},.8,.8,9,7);
         const auto actual=registry.sample("coherent",mesh,field,plane);
         for(const auto& point:actual) { Check(point.valid,"Plane sample inside mesh");Near(point.value,Polynomial(point.position),1e-10,"Plane analytic value"); }
+    }
+    {
+        // A plane overhanging the mesh: the coherent method skips elements by
+        // padded bounds, and must still agree with the exhaustive reference.
+        const auto plane=RayFEM::MakePlaneSamples({.5,.5,dim==3?.43:0},{0,dim==3?.2:0,1},1.7,1.5,23,19);
+        const auto coherent=registry.sample("coherent",mesh,field,plane);
+        const auto exhaustive=registry.sample("exhaustive",mesh,field,plane);
+        int inside=0,outside=0;
+        for(size_t i=0;i<plane.size();++i) {
+            Check(coherent[i].valid==exhaustive[i].valid && coherent[i].element==exhaustive[i].element,"Bounded search finds the reference element");
+            if(coherent[i].valid){++inside;Near(coherent[i].value,exhaustive[i].value,2e-10,"Bounded search matches reference value");}
+            else ++outside;
+        }
+        Check(inside>0 && outside>0,"Overhanging plane has samples inside and outside");
     }
     std::cout << "PASS " << dim << "D " << (curved?"curved":"straight") << " polynomial and misses\n";
 }

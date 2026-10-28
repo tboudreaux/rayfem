@@ -70,6 +70,15 @@ inline void EndSection() {
     ImGui::Dummy({0, 4});
 }
 
+// A small busy indicator: a faint ring with a rotating arc.
+inline void DrawSpinner(ImDrawList* draw, ImVec2 center, float radius, ImU32 color, double time) {
+    constexpr float pi = 3.14159265f;
+    const float start = static_cast<float>(std::fmod(time*2*pi, 2*pi));
+    draw->AddCircle(center, radius, WithAlpha(color, 50), 24, 2);
+    draw->PathArcTo(center, radius, start, start + 1.4f*pi, 20);
+    draw->PathStroke(color, 0, 2);
+}
+
 // An on/off switch with its label. Same contract as ImGui::Checkbox.
 inline bool Switch(const char* label, bool* value) {
     const float frame = ImGui::GetFrameHeight();

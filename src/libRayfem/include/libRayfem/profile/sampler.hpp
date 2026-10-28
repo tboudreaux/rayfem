@@ -26,6 +26,9 @@ struct ProfileSample {
 // Ray distance s includes both endpoints; direction is normalized internally.
 std::vector<ProfileSample> MakeRaySamples(ProfilePosition origin, ProfilePosition direction,
                                           double length, int count);
+// The plane's in-plane u and v axes for a normal (normalized internally); the
+// same basis MakePlaneSamples uses, so callers can place handles on the plane.
+std::array<ProfilePosition, 2> PlaneAxes(ProfilePosition normal);
 // Plane coordinates u/v span [-width/2,width/2] and [-height/2,height/2].
 // Samples are row-major (u varies fastest), using a stable orthonormal basis.
 std::vector<ProfileSample> MakePlaneSamples(ProfilePosition center, ProfilePosition normal,

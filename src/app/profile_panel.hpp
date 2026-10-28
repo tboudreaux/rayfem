@@ -41,7 +41,9 @@ public:
     }
     // The first ray of a session is placed on elements; later opens keep it.
     void OpenRay() { SetMode(1); if(!rayPlaced) placementRequest=-1; }
-    // -1 asks the viewer to place a new ray; 0 or 1 to re-place that endpoint.
+    // -1 asks the viewer to place a new ray; 0 or 1 to re-place that endpoint;
+    // PlaneCenterRequest to place (or re-place) the plane center.
+    static constexpr int PlaneCenterRequest=2;
     std::optional<int> TakePlacementRequest() { auto request=placementRequest; placementRequest.reset(); return request; }
     const std::array<RayFEM::UI::RayAnchor,2>& Anchors() const { return anchors; }
     // Endpoints fixed to elements follow the mesh on every frame.
@@ -50,6 +52,16 @@ public:
         ApplyAnchors(true);
     }
     void OpenPlane() { SetMode(2); }
+    const RayFEM::UI::RayAnchor& CenterAnchor() const { return centerAnchor; }
+    // A plane center fixed to an element follows the mesh on every frame.
+    void SetCenterAnchor(const RayFEM::UI::RayAnchor& value) {
+        centerAnchor=value;centerAnchorMesh=context?context->mesh:nullptr;
+        ApplyCenterAnchor(true);
+    }
+    // The viewer cuts the mesh at the plane while this is on.
+    bool ClipsMesh() const { return mode==2 && clipMesh; }
+    Vector3 PlaneCenter() const { return center; }
+    Vector3 PlaneNormal() const { return Vector3Normalize(normal); }
     void SetWorker(RayFEM::UI::FramePipeline* pipeline) { worker=pipeline; }
 
     // Call even when this panel's controls are hidden in another sidebar tab.
@@ -63,7 +75,7 @@ public:
            settings.excluded_elements!=options.excluded_elements;
         if(changed) dirty=true;
         context=frame;fieldPointer=field;settings=options;currentFieldName=fieldName;
-        if(changed) ApplyAnchors(false);
+        if(changed) {ApplyAnchors(false);ApplyCenterAnchor(false);}
     }
 
     void SetBounds(BoundingBox bounds, const std::shared_ptr<mfem::Mesh>& mesh) {
@@ -89,6 +101,47 @@ public:
         RayFEM::UI::EndSection();
     }
 private:
+    void PlaneControls() {
+        if(ImGui::Button(ICON_FA_CROSSHAIRS "  Place center on element",{-1,0}))placementRequest=PlaneCenterRequest;
+        Tip("Choose an element, then place the plane center on its surface. A placed center moves with the mesh.");
+        RayFEM::UI::FieldLabel("Center");
+        if(centerAnchor.Valid()) {
+            ImGui::Text("element %d",centerAnchor.element);ImGui::SameLine();
+            if(ImGui::SmallButton("Edit"))placementRequest=PlaneCenterRequest;
+            Tip("Move the center on its element, or choose another element.");
+        } else ImGui::TextDisabled("free point");
+        // Orientation presets refit the plane to the mesh.
+        RayFEM::UI::FieldLabel("Facing");
+        const float buttonWidth=(ImGui::GetContentRegionAvail().x-4*ImGui::GetStyle().ItemSpacing.x)/5;
+        const char* axes[]={"X","Y","Z"};
+        for(int axis=0;axis<3;++axis) {
+            if(axis)ImGui::SameLine();
+            if(ImGui::Button(axes[axis],{buttonWidth,0})){Vector3 unit{};(&unit.x)[axis]=1;SetPlaneNormal(unit);}
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))ImGui::SetTooltip("Normal along +%s, sized to the mesh",axes[axis]);
+        }
+        ImGui::SameLine();
+        if(ImGui::Button(ICON_FA_VIDEO "###plane_view",{buttonWidth,0}))
+            SetPlaneNormal(Vector3Subtract(lastCamera.position,lastCamera.target));
+        Tip("Face the camera, sized to the mesh.");
+        ImGui::SameLine();
+        if(ImGui::Button(ICON_FA_RIGHT_LEFT "###plane_flip",{buttonWidth,0})){normal=Vector3Negate(normal);dirty=true;lastRequest={};}
+        Tip("Flip the normal. With Cut the mesh on, this keeps the other side.");
+        // Slide the plane along its normal; the bounds give the useful range.
+        const Vector3 unit=Vector3Length(normal)>0?Vector3Normalize(normal):Vector3{0,0,1};
+        const Vector3 middle=Vector3Scale(Vector3Add(meshBounds.min,meshBounds.max),.5f);
+        const float reach=.5f*Vector3Length(Vector3Subtract(meshBounds.max,meshBounds.min));
+        float offset=Vector3DotProduct(Vector3Subtract(center,middle),unit);
+        RayFEM::UI::FieldLabel("Offset");ImGui::SetNextItemWidth(-1);
+        if(ImGui::SliderFloat("##plane_offset",&offset,-reach,reach,"%.4g")) {
+            const float shift=offset-Vector3DotProduct(Vector3Subtract(center,middle),unit);
+            center=Vector3Add(center,Vector3Scale(unit,shift));centerAnchor={};dirty=true;
+        }
+        Tip("Slide the plane along its normal through the mesh. This frees a placed center.");
+        if(ImGui::Button(ICON_FA_EXPAND "  Fit to mesh",{-1,0}))FitPlane();
+        Tip("Size the plane to cover the mesh. Drag the edge handles in the viewport to resize it by hand.");
+        if(RayFEM::UI::Switch("Cut the mesh here",&clipMesh))dirty=true;
+        Tip("Clip the 3D view at this plane so the cut face shows the field in place. Turning it off restores your clipping settings.");
+    }
     void ControlsBody() {
         ImGui::PushID("Profile controls");
         int selectedMode=mode;
@@ -121,7 +174,7 @@ private:
             ImGui::SameLine();
             if(ImGui::Button(ICON_FA_VIDEO "###view_ray",{width,0}))ViewRay();
             Tip("Ray through the mesh center along your view direction");
-        } else ImGui::TextDisabled("Drag the handles in the viewport.");
+        } else PlaneControls();
         RayFEM::UI::Switch("Live update",&liveUpdate);
         Tip("Resample automatically while you move the profile and when the frame changes. Turn off to sample on demand.");
         if(!liveUpdate) {
@@ -143,7 +196,8 @@ private:
                 RayFEM::UI::FieldLabel("Length");dirty|=ImGui::DragFloat("##length",&length,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
                 RayFEM::UI::FieldLabel("Samples");dirty|=ImGui::SliderInt("##count",&count,2,1024);
             } else {
-                ImGui::TextDisabled("Center");dirty|=ImGui::DragFloat3("##center",&center.x,scale*.005f,0,0,"%.4g");
+                ImGui::TextDisabled("Center");
+                if(ImGui::DragFloat3("##center",&center.x,scale*.005f,0,0,"%.4g")){dirty=true;centerAnchor={};}
                 ImGui::TextDisabled("Normal");dirty|=ImGui::DragFloat3("##normal",&normal.x,.01f,0,0,"%.4g");
                 RayFEM::UI::FieldLabel("Width");dirty|=ImGui::DragFloat("##width",&width,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
                 RayFEM::UI::FieldLabel("Height");dirty|=ImGui::DragFloat("##height",&height,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
@@ -194,7 +248,7 @@ public:
         };
         bool reserved=false;
         // Handle hit testing: start, end and (for rays) the midpoint.
-        Vector3 points[3];const int count=Handles(points);
+        Vector3 points[6];const int count=Handles(points);
         int near=-1;float best=144;
         for(int i=0;i<count;++i) {
             if(Vector3DotProduct(Vector3Subtract(points[i],camera.position),forward)<=0) continue;
@@ -207,8 +261,9 @@ public:
         if(hoverHandle>=0 || handle>=0) ImGui::SetMouseCursor(handle==2||hoverHandle==2?ImGuiMouseCursor_ResizeAll:ImGuiMouseCursor_Hand);
         if (hovered && near>=0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             handle=near;anchor=points[handle];dragNormal=forward;pressOrigin=origin;pressCenter=center;
-            // Dragging frees an endpoint from its element.
+            // Dragging frees an endpoint (or the plane center) from its element.
             if(mode==1){if(handle!=1)anchors[0]={};if(handle!=0)anchors[1]={};}
+            else if(handle==0)centerAnchor={};
             pressEnd=Vector3Add(origin,Vector3Scale(Vector3Normalize(direction),length));
         }
         if (handle>=0) {
@@ -234,9 +289,14 @@ public:
                     }
                     const Vector3 delta=Vector3Subtract(end,start);
                     if(Vector3Length(delta)>scale*1e-4f) {origin=start;direction=Vector3Normalize(delta);length=Vector3Length(delta);}
-                } else {
-                    if(handle==0) center=*point;
-                    else normal=Vector3Normalize(Vector3Subtract(*point,center));
+                } else if(handle==0) center=*point;
+                else if(handle==1) normal=Vector3Normalize(Vector3Subtract(*point,center));
+                else if(const auto axes=PlaneAxesFor(normal)) {
+                    // Edges resize symmetrically, measured in the plane itself.
+                    const Vector3 through=onPlane(ray,center,Vector3Normalize(normal)).value_or(*point);
+                    const Vector3 axis=handle<4?axes->first:axes->second;
+                    const float half=std::abs(Vector3DotProduct(Vector3Subtract(through,center),axis));
+                    (handle<4?width:height)=std::max(scale*.005f,2*half);
                 }
                 dirty=true;
             }
@@ -249,13 +309,21 @@ public:
     // Plane outline in the 3D pass. Rays are drawn as an overlay by DrawHandles.
     void DrawGuide() const {
         if(mode!=2) return;
-        Vector3 points[3];Handles(points);
+        Vector3 points[6];Handles(points);
         for (int i=0;i<2;++i) if (!std::isfinite(points[i].x)||!std::isfinite(points[i].y)||!std::isfinite(points[i].z)) return;
         DrawLine3D(points[0],points[1],RayFEM::UI::Palette().profile_guide);
         if(mode==2 && Vector3Length(normal)>0.001f && std::isfinite(width) && std::isfinite(height) && width>0 && height>0) {
             auto corners=RayFEM::MakePlaneSamples(Position(center),Position(normal),width,height,2,2);
             for(auto edge: {std::pair{0,1},std::pair{1,3},std::pair{3,2},std::pair{2,0}})
                 DrawLine3D(Vector(corners[edge.first].position),Vector(corners[edge.second].position),RayFEM::UI::Palette().profile_guide);
+            // A faint fill shows the plane's extent; the cut face replaces it when clipping.
+            if(!clipMesh) {
+                const ::Color fill=RayFEM::UI::ThemeAlpha(RayFEM::UI::Palette().profile_guide,40);
+                const Vector3 a=Vector(corners[0].position),b=Vector(corners[1].position),c=Vector(corners[2].position),d=Vector(corners[3].position);
+                rlDisableDepthMask();
+                DrawTriangle3D(a,b,d,fill);DrawTriangle3D(a,d,c,fill);DrawTriangle3D(a,d,b,fill);DrawTriangle3D(a,c,d,fill);
+                rlDrawRenderBatchActive();rlEnableDepthMask();
+            }
         }
     }
 
@@ -326,25 +394,31 @@ public:
                 }
             }
         }
-        Vector3 points[3];const int count=Handles(points);
-        const char* labels[2][3]={{"Start","End","Move ray"},{"Plane center","Plane normal",""}};
+        Vector3 points[6];const int count=Handles(points);
+        const char* labels[2][6]={{"Start","End","Move ray","","",""},{"Plane center","Plane normal","Width","Width","Height","Height"}};
         for(int i=0;i<count;++i) {
             ImVec2 screen;
             if(Vector3DotProduct(Vector3Subtract(points[i],camera.position),Vector3Subtract(camera.target,camera.position))<=0 || !project(points[i],screen)) continue;
             if(screen.x<viewport.x-8 || screen.x>viewport.x+size.x+8 || screen.y<viewport.y-8 || screen.y>viewport.y+size.y+8)continue;
             const bool active=handle==i||hoverHandle==i;
-            if(i==2) {
+            if(mode==2 && i>=2) {
+                // Edge handles are small squares, set apart from the round ones.
+                const float r=active?5.5f:4;
+                draw->AddRectFilled({screen.x-r,screen.y-r},{screen.x+r,screen.y+r},palette.handle_outline,1.5f);
+                draw->AddRect({screen.x-r,screen.y-r},{screen.x+r,screen.y+r},palette.guide,1.5f,0,2);
+            } else if(i==2) {
                 draw->AddCircleFilled(screen,active?6:4.5f,palette.handle_outline);
                 draw->AddCircle(screen,active?6:4.5f,palette.guide,0,2);
             } else {
                 draw->AddCircleFilled(screen,active?8:6,palette.guide);
                 draw->AddCircle(screen,active?10:8,palette.handle_outline,0,2);
-                if(mode==1 && anchors[i].Valid())draw->AddCircle(screen,active?13:11,palette.accent,0,1.5f);
+                if((mode==1 && anchors[i].Valid()) || (mode==2 && i==0 && centerAnchor.Valid()))draw->AddCircle(screen,active?13:11,palette.accent,0,1.5f);
             }
             // Labels appear only for the handle under the cursor or being dragged.
             if(!active)continue;
             std::string label=labels[mode==1?0:1][i];
             if(mode==1 && i<2 && anchors[i].Valid())label+="  ·  element "+std::to_string(anchors[i].element);
+            if(mode==2 && i==0 && centerAnchor.Valid())label+="  ·  element "+std::to_string(centerAnchor.element);
             const ImVec2 labelSize=ImGui::CalcTextSize(label.c_str());
             const ImVec2 boxSize={labelSize.x+12,labelSize.y+8};
             const ImVec2 labelMin={std::clamp(screen.x+13,viewport.x+4,std::max(viewport.x+4,viewport.x+size.x-boxSize.x-4)),
@@ -507,12 +581,26 @@ private:
         const auto c=RayFEM::SampleColorMap(settings.color_map,t,settings.reverse_colors);
         return IM_COL32(c.r,c.g,c.b,c.a);
     }
-    // Start and end (plus the midpoint for rays); returns how many are used.
-    int Handles(Vector3 (&points)[3]) const {
+    // Rays: start, end and midpoint. Planes: center, normal tip, then the
+    // +u, -u, +v and -v edge midpoints. Returns how many are used.
+    int Handles(Vector3 (&points)[6]) const {
         points[0]=mode==1?origin:center;
         points[1]=Vector3Add(points[0],Vector3Scale(Vector3Normalize(mode==1?direction:normal),mode==1?length:scale*0.25f));
         points[2]=Vector3Scale(Vector3Add(points[0],points[1]),.5f);
-        return mode==1?3:2;
+        if(mode==1)return 3;
+        const auto axes=PlaneAxesFor(normal);
+        if(!axes)return 2;
+        points[2]=Vector3Add(center,Vector3Scale(axes->first,width*.5f));
+        points[3]=Vector3Subtract(center,Vector3Scale(axes->first,width*.5f));
+        points[4]=Vector3Add(center,Vector3Scale(axes->second,height*.5f));
+        points[5]=Vector3Subtract(center,Vector3Scale(axes->second,height*.5f));
+        return 6;
+    }
+    // The sampler's in-plane axes, or nothing for a degenerate normal.
+    static std::optional<std::pair<Vector3,Vector3>> PlaneAxesFor(Vector3 n) {
+        if(!(Vector3Length(n)>1e-6f) || !std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z))return std::nullopt;
+        const auto axes=RayFEM::PlaneAxes(Position(n));
+        return std::pair{Vector(axes[0]),Vector(axes[1])};
     }
     // Distance from a point to the far side of the mesh bounds along a direction.
     float ExitDistance(Vector3 from,Vector3 along) const {
@@ -532,6 +620,34 @@ public:
         Vector3 unit{};(&unit.x)[axis]=1;
         Vector3 start=center;(&start.x)[axis]=(&meshBounds.min.x)[axis];
         SetRay(start,unit,(&meshBounds.max.x)[axis]-(&meshBounds.min.x)[axis]);
+    }
+    // Orient the plane and size it to the mesh.
+    void SetPlaneNormal(Vector3 value) {
+        if(!(Vector3Length(value)>0))return;
+        normal=Vector3Normalize(value);FitPlane();
+    }
+    // Cover the mesh bounds. A free center is recentered in the plane; a
+    // placed one stays, with the plane grown symmetrically around it.
+    void FitPlane() {
+        const auto axes=PlaneAxesFor(normal);
+        if(!axes)return;
+        float low[2]={INFINITY,INFINITY},high[2]={-INFINITY,-INFINITY};
+        for(int corner=0;corner<8;++corner) {
+            const Vector3 p{corner&1?meshBounds.max.x:meshBounds.min.x,corner&2?meshBounds.max.y:meshBounds.min.y,corner&4?meshBounds.max.z:meshBounds.min.z};
+            const Vector3 d=Vector3Subtract(p,center);
+            const float c[2]={Vector3DotProduct(d,axes->first),Vector3DotProduct(d,axes->second)};
+            for(int k=0;k<2;++k){low[k]=std::min(low[k],c[k]);high[k]=std::max(high[k],c[k]);}
+        }
+        const float margin=1.02f,minimum=scale*.01f;
+        if(centerAnchor.Valid()) {
+            width=std::max(minimum,2*margin*std::max(-low[0],high[0]));
+            height=std::max(minimum,2*margin*std::max(-low[1],high[1]));
+        } else {
+            center=Vector3Add(center,Vector3Add(Vector3Scale(axes->first,.5f*(low[0]+high[0])),Vector3Scale(axes->second,.5f*(low[1]+high[1]))));
+            width=std::max(minimum,margin*(high[0]-low[0]));
+            height=std::max(minimum,margin*(high[1]-low[1]));
+        }
+        dirty=true;lastRequest={};
     }
     void ViewRay() {
         const Vector3 forward=Vector3Normalize(Vector3Subtract(lastCamera.target,lastCamera.position));
@@ -559,6 +675,16 @@ private:
             origin=start;direction=unit;length=Vector3Length(delta);dirty=true;
             if(force)lastRequest={};
         }
+    }
+    void ApplyCenterAnchor(bool force) {
+        if(!centerAnchor.Valid() || !context || !context->mesh)return;
+        if(centerAnchorMesh.lock()!=context->mesh) {
+            centerAnchor={};message="The mesh changed; place the plane center again.";return;
+        }
+        try {
+            if(auto p=RayFEM::UI::AnchorPosition(*context->mesh,centerAnchor,settings))
+                if(force || Vector3Distance(*p,center)>0){center=*p;dirty=true;if(force)lastRequest={};}
+        } catch(const std::exception& e){message=e.what();}
     }
     // Live updates: a quick preview while dragging, then a full
     // sample once the profile is still. Frame changes resample too.
@@ -674,10 +800,12 @@ private:
     Vector3 pressOrigin{},pressEnd{},pressCenter{};
     std::array<RayFEM::UI::RayAnchor,2> anchors{};
     std::weak_ptr<mfem::Mesh> anchorMesh;
+    RayFEM::UI::RayAnchor centerAnchor{};
+    std::weak_ptr<mfem::Mesh> centerAnchorMesh;
     std::optional<int> placementRequest;
     BoundingBox meshBounds{{-1,-1,-1},{1,1,1}};
     Camera3D lastCamera{};
-    bool rayPlaced=false,liveUpdate=true,inFlight=false;
+    bool rayPlaced=false,liveUpdate=true,inFlight=false,clipMesh=false;
     double sampledLength=0;
     mutable double rayHoverS=std::numeric_limits<double>::quiet_NaN(),plotHoverS=std::numeric_limits<double>::quiet_NaN();
     RayFEM::UI::FramePipeline* worker=nullptr;
