@@ -631,6 +631,7 @@ private:
         if (ImGui::Button(infoLabel)) ImGui::OpenPopup("Session info");
         Tip("Session details, statistics and mouse controls");
         if (ImGui::BeginPopup("Session info")) {
+            ImGui::SeparatorText("Stream");
             ImGui::Text("%s:%d",opts.listen.c_str(),opts.port);
             ImGui::Text("%zu received / %zu queued",server.getReceivedFrameCount(),server.getPendingFrameCount());
             ImGui::Text("%zu dropped / %zu errors",server.getDroppedFrameCount(),server.getErrorCount());
@@ -640,12 +641,28 @@ private:
             if (!server.getLastError().empty()) ImGui::TextWrapped("%s",server.getLastError().c_str());
             ImGui::Text("SERiF files: %s", RayFEM::SerifLoadingAvailable()?"available":"not enabled in this build");
             if (!archivePath.empty()) {
-                ImGui::Separator();
+                ImGui::SeparatorText("Archive");
                 ImGui::TextWrapped("%s", archivePath.c_str());
                 for (const auto& warning : archiveWarnings) ImGui::TextWrapped("%s", warning.c_str());
             }
             ImGui::Separator();
-            ImGui::TextUnformatted("Click to select  /  Shift-click to add or remove\nDrag to orbit  /  Middle-drag to pan\nScroll to zoom  /  R to fit\nClick the orientation cube to align\nCube arrows: 5° / double arrows: 45°\nArrow keys to step frames");
+            ImGui::SeparatorText("Controls");
+            if (ImGui::BeginTable("##controls",2,ImGuiTableFlags_SizingFixedFit)) {
+                const char* controls[][2]={
+                    {"Click","Select an element"},{"Shift-click","Add or remove from the selection"},
+                    {"Drag","Orbit"},{"Middle-drag","Pan"},{"Scroll","Zoom"},
+                    {"R","Fit the mesh in view"},{"Home","Return to the home view"},
+                    {"Left / Right","Step one frame"},{"Ctrl/Cmd+O","Open an archive"},
+                    {"Esc","Cancel DOF picking"},
+                    {"Orientation cube","Click a face, edge or corner to align"},
+                    {"Cube arrows","Rotate 5° (single) or 45° (double)"}};
+                for (const auto& [input,effect] : controls) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);ImGui::TextUnformatted(input);
+                    ImGui::TableSetColumnIndex(1);ImGui::TextDisabled("%s",effect);
+                }
+                ImGui::EndTable();
+            }
             ImGui::EndPopup();
         }
         if ((ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper) && ImGui::IsKeyPressed(ImGuiKey_O))
@@ -984,8 +1001,32 @@ private:
             ImGui::DragFloat3("##clip_position",&slicePoint.x,radius*0.01f);
             ImGui::TextDisabled("Normal");ImGui::SetNextItemWidth(-1);
             ImGui::DragFloat3("##clip_normal",&sliceNormal.x,0.01f,-1,1);
+            {
+                const float presetWidth=(ImGui::GetContentRegionAvail().x-4*ImGui::GetStyle().ItemSpacing.x)/5;
+                const Vector3 axes[]={{1,0,0},{0,1,0},{0,0,1}};
+                const char* axisLabels[]={"X","Y","Z"};
+                for(int i=0;i<3;++i) {
+                    if(i)ImGui::SameLine();
+                    if(ImGui::Button(axisLabels[i],{presetWidth,0}))sliceNormal=axes[i];
+                    if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))ImGui::SetTooltip("Normal along +%s",axisLabels[i]);
+                }
+                ImGui::SameLine();
+                if(ImGui::Button(ICON_FA_VIDEO "###clip_view",{presetWidth,0}))
+                    sliceNormal=Vector3Normalize(Vector3Subtract(camera.position,camera.target));
+                Tip("Face the camera: cut away the half nearer the viewer.");
+                ImGui::SameLine();
+                if(ImGui::Button(ICON_FA_RIGHT_LEFT "###clip_flip",{presetWidth,0}))sliceNormal=Vector3Negate(sliceNormal);
+                Tip("Flip the normal to keep the other side.");
+                if(ImGui::Button(ICON_FA_CROSSHAIRS "  Through view center",{-1,0}))slicePoint=camera.target;
+                Tip("Move the plane through the point the camera orbits around.");
+            }
         }
     }
+
+    static constexpr const char* previousFrameLabel=ICON_FA_BACKWARD_STEP "###previous";
+    static constexpr const char* nextFrameLabel=ICON_FA_FORWARD_STEP "###next";
+    static constexpr const char* liveLabel=ICON_FA_TOWER_BROADCAST "  Live###live";
+    static constexpr float playButtonWidth=92;
 
     std::string TimelineLabel() const {
         auto frame=Current();
@@ -998,9 +1039,9 @@ private:
     float TimelineHeight(float width) const {
         const auto& style=ImGui::GetStyle();
         const float row=ImGui::GetFrameHeight();
-        const float controls=ImGui::CalcTextSize("<").x+ImGui::CalcTextSize(">").x+
-            4*style.FramePadding.x+60+100+row+style.ItemInnerSpacing.x+
-            ImGui::CalcTextSize("Live").x+4*style.ItemSpacing.x;
+        auto button=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+2*style.FramePadding.x;};
+        const float controls=button(previousFrameLabel)+button(nextFrameLabel)+playButtonWidth+100+
+            button(liveLabel)+4*style.ItemSpacing.x;
         const bool wrap=Current() && controls+style.ItemSpacing.x+ImGui::CalcTextSize(TimelineLabel().c_str()).x>width;
         return row*(Current()?2:1)+style.ItemSpacing.y*3+(wrap?row+style.ItemSpacing.y:0);
     }
@@ -1008,22 +1049,26 @@ private:
     void DrawTimeline() {
         ImGui::Spacing();
         ImGui::BeginDisabled(frames.empty());
-        if(ImGui::Button("<")) {if(selected>0)--selected;follow=false;playing=false;}
-        Tip("Previous frame");ImGui::SameLine();
-        if(ImGui::Button(playing?"Pause":"Play",{60,0})) {playing=!playing;follow=false;lastPlay=GetTime();}
+        if(ImGui::Button(previousFrameLabel)) {if(selected>0)--selected;follow=false;playing=false;}
+        Tip("Previous frame (Left arrow over the viewport)");ImGui::SameLine();
+        if(ImGui::Button(playing?ICON_FA_PAUSE "  Pause###play":ICON_FA_PLAY "  Play###play",{playButtonWidth,0}))
+            {playing=!playing;follow=false;lastPlay=GetTime();}
+        Tip(playing?"Pause playback":"Play retained frames in a loop");
         ImGui::SameLine();
-        if(ImGui::Button(">")) {if(selected+1<static_cast<int>(frames.size()))++selected;follow=false;playing=false;}
-        Tip("Next frame");ImGui::SameLine();
+        if(ImGui::Button(nextFrameLabel)) {if(selected+1<static_cast<int>(frames.size()))++selected;follow=false;playing=false;}
+        Tip("Next frame (Right arrow over the viewport)");ImGui::SameLine();
         ImGui::SetNextItemWidth(100);ImGui::SliderFloat("##fps",&playbackFps,1,60,"%.0f fps");
         Tip("Playback speed");ImGui::SameLine();
-        if(ImGui::Checkbox("Live",&follow)) playing=false;
-        Tip("Follow incoming frames");
+        if(RayFEM::UI::ToggleButton(liveLabel,follow)) {follow=!follow;playing=false;}
+        Tip(follow?"Following incoming frames. Click to stay on the current frame.":"Jump to and follow the newest frame");
         if(auto frame=Current()) {
             const auto label=TimelineLabel();
             RayFEM::UI::NextInlineItem(ImGui::CalcTextSize(label.c_str()).x);
             ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",label.c_str());
             ImGui::SetNextItemWidth(-1);
-            if(ImGui::SliderInt("##frame",&selected,0,static_cast<int>(frames.size())-1,"")) {follow=false;playing=false;}
+            char position[48];
+            std::snprintf(position,sizeof(position),"%%d / %d retained",static_cast<int>(frames.size())-1);
+            if(ImGui::SliderInt("##frame",&selected,0,static_cast<int>(frames.size())-1,position)) {follow=false;playing=false;}
         }
         ImGui::EndDisabled();
     }

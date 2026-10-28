@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 #include "theme.hpp"
+#include "extras/IconsFontAwesome6.h"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -45,9 +46,9 @@ public:
         bool choose = ImGui::InputText("##archive_path", path.data(), path.size(),
                                       ImGuiInputTextFlags_EnterReturnsTrue |
                                       ImGuiInputTextFlags_AutoSelectAll);
-        if (ImGui::Button("Up")) Navigate(directory.parent_path());
+        if (ImGui::Button(ICON_FA_ARROW_TURN_UP "  Up")) Navigate(directory.parent_path());
         ImGui::SameLine();
-        if (ImGui::Button("Refresh")) Navigate(directory);
+        if (ImGui::Button(ICON_FA_ARROWS_ROTATE "  Refresh")) Navigate(directory);
         ImGui::SameLine();
         ImGui::TextDisabled(".serif");
         std::optional<std::filesystem::path> nextDirectory;
@@ -63,7 +64,7 @@ public:
         while (clipper.Step()) for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
             const auto& entry = entries[i];
             const auto filename = entry.path.filename().string();
-            const std::string label = (entry.directory ? "[Folder]  " : "") + filename;
+            const std::string label = (entry.directory ? ICON_FA_FOLDER "  " : ICON_FA_FILE "  ") + filename;
             ImGui::PushID(filename.c_str());
             if (ImGui::Selectable(label.c_str(), entry.path.string() == path.data(),
                                   ImGuiSelectableFlags_AllowDoubleClick,{0,rowHeight})) {
