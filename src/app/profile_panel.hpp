@@ -81,19 +81,19 @@ public:
                 ImGui::TextDisabled("Origin");dirty|=ImGui::DragFloat3("##origin",&origin.x,scale*.005f,0,0,"%.4g");
                 ImGui::TextDisabled("Direction");dirty|=ImGui::DragFloat3("##direction",&direction.x,.01f,0,0,"%.4g");
                 Tip("The direction is normalized when sampled. Drag the endpoint to change direction and length together.");
-                ImGui::TextDisabled("Length");dirty|=ImGui::DragFloat("##length",&length,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
-                ImGui::TextDisabled("Samples");dirty|=ImGui::SliderInt("##count",&count,2,1024);
+                RayFEM::UI::FieldLabel("Length");dirty|=ImGui::DragFloat("##length",&length,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
+                RayFEM::UI::FieldLabel("Samples");dirty|=ImGui::SliderInt("##count",&count,2,1024);
             } else {
                 ImGui::TextDisabled("Center");dirty|=ImGui::DragFloat3("##center",&center.x,scale*.005f,0,0,"%.4g");
                 ImGui::TextDisabled("Normal");dirty|=ImGui::DragFloat3("##normal",&normal.x,.01f,0,0,"%.4g");
-                ImGui::TextDisabled("Width");dirty|=ImGui::DragFloat("##width",&width,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
-                ImGui::TextDisabled("Height");dirty|=ImGui::DragFloat("##height",&height,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
-                ImGui::TextDisabled("Columns");dirty|=ImGui::SliderInt("##columns",&columns,2,128);
-                ImGui::TextDisabled("Rows");dirty|=ImGui::SliderInt("##rows",&rows,2,128);
+                RayFEM::UI::FieldLabel("Width");dirty|=ImGui::DragFloat("##width",&width,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
+                RayFEM::UI::FieldLabel("Height");dirty|=ImGui::DragFloat("##height",&height,scale*.01f,.0001f,scale*100,"%.4g",ImGuiSliderFlags_AlwaysClamp);
+                RayFEM::UI::FieldLabel("Columns");dirty|=ImGui::SliderInt("##columns",&columns,2,128);
+                RayFEM::UI::FieldLabel("Rows");dirty|=ImGui::SliderInt("##rows",&rows,2,128);
             }
             const auto algorithms=registry.algorithms();
             auto current=std::find_if(algorithms.begin(),algorithms.end(),[&](const auto& a){return a.id==algorithm;});
-            ImGui::TextDisabled("Sampling method");
+            RayFEM::UI::FieldLabel("Sampling method");
             if(ImGui::BeginCombo("##method",current==algorithms.end()?algorithm.c_str():current->name.c_str())) {
                 for(const auto& a:algorithms)if(ImGui::Selectable(a.name.c_str(),a.id==algorithm)){algorithm=a.id;dirty=true;}
                 ImGui::EndCombo();

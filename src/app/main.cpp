@@ -660,7 +660,9 @@ private:
         tracking.SetExcludedMaterials(excludedMaterials,frames);
         tracking.SetExcludedElements(elements.Hidden(),frame,frames);
         tracking.ProcessPending();
-        ImGui::BeginChild("Inspector",{300,0},ImGuiChildFlags_Borders);
+        // Drag the inspector's right edge to widen it; the size lasts for the session.
+        ImGui::SetNextWindowSizeConstraints({260,0},{std::max(260.0f,GetScreenWidth()*.45f),FLT_MAX});
+        ImGui::BeginChild("Inspector",{300,0},ImGuiChildFlags_Borders|ImGuiChildFlags_ResizeX);
         ImGui::PushItemWidth(164);
         if (ImGui::BeginTabBar("Inspector tabs")) {
             if (ImGui::BeginTabItem("View",nullptr,inspectorTab==0?ImGuiTabItemFlags_SetSelected:0)) {
@@ -724,11 +726,17 @@ private:
             showPlots=!showPlots;
         const float available=ImGui::GetContentRegionAvail().y;
         const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || tracking.HasTracks() || plotTab==1);
-        const float plotHeight=plotVisible?std::clamp(available*0.40f,200.0f,320.0f):0;
+        float plotHeight=0;
+        if(plotVisible) {
+            const float maximum=std::max(140.0f,available-TimelineHeight(ImGui::GetContentRegionAvail().x)-200);
+            plotHeight=std::clamp(plotPanelHeight>0?plotPanelHeight:std::clamp(available*0.40f,200.0f,320.0f),
+                                  std::min(140.0f,maximum),maximum);
+        }
         const float timelineHeight=TimelineHeight(ImGui::GetContentRegionAvail().x);
         DrawViewport({ImGui::GetContentRegionAvail().x,std::max(120.0f,available-timelineHeight-(plotVisible?plotHeight+style.ItemSpacing.y:0))});
         DrawTimeline();
         if (plotVisible) {
+            PlotSplitter(plotHeight);
             ImGui::BeginChild("Plots",{0,0},ImGuiChildFlags_Borders);
             if(ImGui::BeginTabBar("Plot tabs")) {
                 if(ImGui::BeginTabItem("Profile",nullptr,plotTab==0?ImGuiTabItemFlags_SetSelected:0)) {
@@ -751,6 +759,21 @@ private:
         }
         ImGui::EndChild();
         ImGui::End();
+    }
+
+    // A horizontal grip above the plots; dragging it trades viewport and plot height.
+    void PlotSplitter(float plotHeight) {
+        const float width=ImGui::GetContentRegionAvail().x;
+        ImGui::InvisibleButton("##plot_splitter",{width,8});
+        const bool hovered=ImGui::IsItemHovered(),active=ImGui::IsItemActive();
+        if(hovered || active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        if(active && ImGui::GetIO().MouseDelta.y!=0) plotPanelHeight=plotHeight-ImGui::GetIO().MouseDelta.y;
+        if(hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) plotPanelHeight=0;
+        Tip("Drag to resize the plots. Double-click to restore the default height.");
+        const ImVec2 min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
+        const float center=(min.x+max.x)*.5f,y=(min.y+max.y)*.5f;
+        const ImU32 color=hovered || active?RayFEM::UI::Palette().accent:ImGui::GetColorU32(ImGuiCol_Border);
+        ImGui::GetWindowDrawList()->AddLine({center-24,y},{center+24,y},color,3);
     }
 
     void ReferencePlaneControl() {
@@ -780,8 +803,7 @@ private:
             ImGui::Spacing();ImGui::TextDisabled("Waiting for frames");
             ImGui::Spacing();ReferencePlaneControl();return;
         }
-        ImGui::Spacing();ImGui::TextDisabled("FIELD");
-        ImGui::SetNextItemWidth(-1);
+        ImGui::Spacing();RayFEM::UI::FieldLabel("Field");
         if(ImGui::BeginCombo("##field",fieldName.c_str())) {
             for(const auto& f:frame->fields) if(ImGui::Selectable(f.name.c_str(),f.name==fieldName)) {
                 fieldName=f.name;view=0;component=0;automaticColorRange=true;
@@ -789,14 +811,17 @@ private:
             ImGui::EndCombo();
         }
         gf=Field(frame);
-        ImGui::SetNextItemWidth(-1);
+        RayFEM::UI::FieldLabel("Show");
         if(ImGui::Combo("##operation",&view,viewNames,6)) automaticColorRange=true;
         if(gf && (view==2 || view==5)) {
-            ImGui::TextDisabled("Component");ImGui::SetNextItemWidth(-1);
+            RayFEM::UI::FieldLabel("Component");
             if(ImGui::SliderInt("##component",&component,0,std::max(0,(view==5?(frame->mesh->Dimension()==2?1:3):gf->VectorDim())-1)))
                 automaticColorRange=true;
         }
-        if(gf) {ImGui::TextDisabled("%s",gf->FESpace()->FEColl()->Name());Tip("Finite element space of the selected field.");}
+        if(gf) {
+            RayFEM::UI::FieldLabel("Space");ImGui::TextDisabled("%s",gf->FESpace()->FEColl()->Name());
+            Tip("Finite element space of the selected field.");
+        }
         bool colorScaleOpen=false;
         if(coloring==0 && gf) {
             colorScaleOpen=ImGui::CollapsingHeader("Color scale");
@@ -805,7 +830,7 @@ private:
             RayFEM::UI::HeaderBadge(badge.c_str());
         }
         if(colorScaleOpen) {
-            ImGui::TextDisabled("Color map");ImGui::SetNextItemWidth(-1);
+            RayFEM::UI::FieldLabel("Color map");
             if(ImGui::BeginCombo("##color_map",RayFEM::ColorMapName(static_cast<RayFEM::ColorMap>(colorMap)))) {
                 for(int i=0;i<RayFEM::ColorMapCount;++i)
                     if(ImGui::Selectable(RayFEM::ColorMapName(static_cast<RayFEM::ColorMap>(i)),i==colorMap))colorMap=i;
@@ -814,7 +839,7 @@ private:
             Tip("Viridis, Plasma, Inferno and Cividis are sequential palettes. Coolwarm is diverging; "
                 "use symmetric limits to center it at zero. Jet preserves the older rainbow colors.");
             ImGui::Checkbox("Reverse colors",&reverseColors);
-            ImGui::TextDisabled("Scale");ImGui::SetNextItemWidth(-1);
+            RayFEM::UI::FieldLabel("Scale");
             int scaleMode=static_cast<int>(colorScale.scale);
             const char* scales[]={"Linear","Signed log","ZScale"};
             if(ImGui::Combo("##color_scale",&scaleMode,scales,3)) {
@@ -835,14 +860,14 @@ private:
                 }
                 Tip("Signed log is continuous through zero. Automatic threshold is 1% of the largest absolute limit.");
                 if(!automaticThreshold) {
-                    ImGui::TextDisabled("Near-zero threshold");ImGui::SetNextItemWidth(-1);
+                    RayFEM::UI::FieldLabel("Near-zero threshold");
                     if(ImGui::InputDouble("##log_threshold",&colorScale.log_threshold,0,0,"%.6g") &&
                         (!std::isfinite(colorScale.log_threshold) || colorScale.log_threshold<=0))
                         colorScale.log_threshold=0;
                 }
             } else if(colorScale.scale==RayFEM::ColorScale::ZScale) {
                 float contrast=static_cast<float>(colorScale.zscale_contrast);
-                ImGui::TextDisabled("ZScale contrast");ImGui::SetNextItemWidth(-1);
+                RayFEM::UI::FieldLabel("ZScale contrast");
                 if(ImGui::SliderFloat("##zscale_contrast",&contrast,0,1,"%.2f",ImGuiSliderFlags_AlwaysClamp))
                     colorScale.zscale_contrast=contrast;
                 Tip("IRAF / DS9 robust limits from volume samples. Higher contrast narrows the range; zero uses the full range.");
@@ -859,9 +884,9 @@ private:
             if(automaticColorRange) ImGui::TextDisabled(colorScale.scale==RayFEM::ColorScale::ZScale?
                 "ZScale limits · current frame":"Volume samples · current frame");
             else {
-                ImGui::TextDisabled("Minimum");ImGui::SetNextItemWidth(-1);
+                RayFEM::UI::FieldLabel("Minimum");
                 ImGui::InputDouble("##minimum",&colorMinimum,0,0,"%.6g");
-                ImGui::TextDisabled("Maximum");ImGui::SetNextItemWidth(-1);
+                RayFEM::UI::FieldLabel("Maximum");
                 ImGui::InputDouble("##maximum",&colorMaximum,0,0,"%.6g");
                 if(!std::isfinite(colorMinimum)||!std::isfinite(colorMaximum)||colorMinimum>colorMaximum) {
                     ImGui::PushStyleColor(ImGuiCol_Text,RayFEM::UI::ThemeText(RayFEM::UI::Palette().warning));
@@ -914,7 +939,7 @@ private:
             ImGui::Checkbox("Element edges",&showBoundaries);
             ImGui::Checkbox("DOF points",&showDofs);
             Tip("Hover for coefficient details. Use Pick DOF to add a time trace.");
-            ImGui::TextDisabled("Explode elements");ImGui::SetNextItemWidth(-1);
+            RayFEM::UI::FieldLabel("Explode elements");
             ImGui::SliderFloat("##element_explosion",&elementExplosion,0,.95f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
             Tip("Open gaps by shrinking each displayed element around its center. Zero restores the mesh. Field values and analysis use the original domain.");
             ReferencePlaneControl();
@@ -924,7 +949,7 @@ private:
                 if (automaticDetail)
                     ImGui::TextDisabled("%d subdivisions per edge", RenderSettings(frame).refinement);
                 else {
-                    ImGui::TextDisabled("Subdivisions");ImGui::SetNextItemWidth(-1);
+                    RayFEM::UI::FieldLabel("Subdivisions");
                     ImGui::SliderInt("##refinement",&refinement,1,32);
                 }
                 ImGui::Checkbox("Tessellation",&wireframe);
@@ -941,7 +966,7 @@ private:
         }
         if(deformationOpen) {
             ImGui::Checkbox("Apply displacement",&deform);
-            ImGui::TextDisabled("Scale");ImGui::SetNextItemWidth(-1);
+            RayFEM::UI::FieldLabel("Scale");
             ImGui::SliderFloat("##displacement_scale",&displacementScale,-2,3,"%.2f");
         }
         const bool clippingOpen=ImGui::CollapsingHeader("Clipping");
@@ -1448,6 +1473,7 @@ private:
     std::vector<int> excludedMaterials;
     int inspectorTab=-1,plotTab=-1;
     bool showPlots=true,pickingDof=false;
+    float plotPanelHeight=0;
     std::deque<std::shared_ptr<RayFEM::RenderFrame>> frames;
     std::deque<ViewCache> cache;
     std::deque<RangeCache> ranges;

@@ -116,13 +116,13 @@ public:
         const char* names[]={"DOF coefficient","Minimum","Maximum","Mean","Integral","L2 norm","Point probe"};
         ImGui::SetNextItemWidth(-1);ImGui::Combo("##measurement",&kind,names,7);
         if(kind==0) {
-            ImGui::TextDisabled("Degree of freedom");ImGui::SetNextItemWidth(-1);
+            RayFEM::UI::FieldLabel("Degree of freedom");
             ImGui::InputInt("##dof",&dof);dof=std::max(0,dof);
             int components=1;
             if(frame) for(const auto& f:frame->fields) if(f.name==field) components=f.gf->FESpace()->GetVDim();
             coefficientComponent=std::clamp(coefficientComponent,0,std::max(0,components-1));
             if(components>1) {
-                ImGui::TextDisabled("Coefficient axis");ImGui::SetNextItemWidth(-1);
+                RayFEM::UI::FieldLabel("Coefficient axis");
                 ImGui::SliderInt("##coefficient_axis",&coefficientComponent,0,components-1);
             }
             else coefficientComponent=0;

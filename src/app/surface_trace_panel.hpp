@@ -52,8 +52,7 @@ public:
         if(ImGui::Combo("##trace_kind",&kind,"Meridian / colatitude\0Latitude / azimuth\0")) {
             beginAngle=0;endAngle=kind==0?180:360;fixedAngle=kind==0?0:90;dirty=true;
         }
-        ImGui::TextDisabled(kind==0?"Azimuth (degrees)":"Colatitude (degrees)");
-        ImGui::SetNextItemWidth(-1);
+        RayFEM::UI::FieldLabel(kind==0?"Azimuth (degrees)":"Colatitude (degrees)");
         dirty|=ImGui::SliderFloat("##fixed_angle",&fixedAngle,0,kind==0?360.0f:180.0f,"%.1f");
         Tip("Colatitude is measured from the axis: 0 at the north pole, 90 at the equator. Azimuth starts at the projected world X direction (world Y when X is nearly parallel to the axis).");
         const bool supported=context && context->mesh && context->mesh->SpaceDimension()==3;
@@ -72,14 +71,14 @@ public:
             ImGui::TextDisabled("Center");dirty|=ImGui::DragFloat3("##center",&center.x,scale*.005f,0,0,"%.4g");
             Tip("Rays start here and use the nearest forward exterior hit. A center inside the object usually gives the clearest trace.");
             ImGui::TextDisabled("Axis");dirty|=ImGui::DragFloat3("##axis",&axis.x,.01f,0,0,"%.4g");
-            ImGui::TextDisabled("Start angle (degrees)");dirty|=ImGui::DragFloat("##begin",&beginAngle,.5f,0,kind==0?180.0f:360.0f,"%.1f",ImGuiSliderFlags_AlwaysClamp);
-            ImGui::TextDisabled("End angle (degrees)");dirty|=ImGui::DragFloat("##end",&endAngle,.5f,0,kind==0?180.0f:360.0f,"%.1f",ImGuiSliderFlags_AlwaysClamp);
-            ImGui::TextDisabled("Samples");dirty|=ImGui::SliderInt("##samples",&count,2,2048);
-            ImGui::TextDisabled("Surface refinement");dirty|=ImGui::SliderInt("##refinement",&refinement,1,16);
+            RayFEM::UI::FieldLabel("Start angle (degrees)");dirty|=ImGui::DragFloat("##begin",&beginAngle,.5f,0,kind==0?180.0f:360.0f,"%.1f",ImGuiSliderFlags_AlwaysClamp);
+            RayFEM::UI::FieldLabel("End angle (degrees)");dirty|=ImGui::DragFloat("##end",&endAngle,.5f,0,kind==0?180.0f:360.0f,"%.1f",ImGuiSliderFlags_AlwaysClamp);
+            RayFEM::UI::FieldLabel("Samples");dirty|=ImGui::SliderInt("##samples",&count,2,2048);
+            RayFEM::UI::FieldLabel("Surface refinement");dirty|=ImGui::SliderInt("##refinement",&refinement,1,16);
             Tip("More subdivisions improve surface search seeds and the approximate method. Field values are evaluated on the actual finite-element face.");
             const auto algorithms=registry.algorithms();
             const auto current=std::find_if(algorithms.begin(),algorithms.end(),[&](const auto& item){return item.id==algorithm;});
-            ImGui::TextDisabled("Sampling method");
+            RayFEM::UI::FieldLabel("Sampling method");
             if(ImGui::BeginCombo("##method",current==algorithms.end()?algorithm.c_str():current->name.c_str())) {
                 for(const auto& item:algorithms)if(ImGui::Selectable(item.name.c_str(),item.id==algorithm)){algorithm=item.id;dirty=true;}
                 ImGui::EndCombo();

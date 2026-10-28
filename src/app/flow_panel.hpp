@@ -92,10 +92,10 @@ public:
         if(!Supported())ImGui::TextWrapped("Choose a field with two or three vector components.");
         ImGui::PushItemWidth(-1);
         if(mode==1 || mode==3) {
-            ImGui::TextDisabled("Arrow count");ImGui::SliderInt("##arrow_count",&arrowCount,16,2048,"%d",ImGuiSliderFlags_AlwaysClamp);
+            RayFEM::UI::FieldLabel("Arrow count");ImGui::SliderInt("##arrow_count",&arrowCount,16,2048,"%d",ImGuiSliderFlags_AlwaysClamp);
         }
         if(mode>=2) {
-            ImGui::TextDisabled("Streamline count");ImGui::SliderInt("##path_count",&pathSeeds,1,512,"%d",ImGuiSliderFlags_AlwaysClamp);
+            RayFEM::UI::FieldLabel("Streamline count");ImGui::SliderInt("##path_count",&pathSeeds,1,512,"%d",ImGuiSliderFlags_AlwaysClamp);
             Tip("Requested total across the selected domain. Zero vectors, clipping and the preview budget can produce fewer lines. Use Update flow for a denser result.");
         }
         ImGui::PopItemWidth();
@@ -117,19 +117,19 @@ public:
         if(ImGui::CollapsingHeader("Flow settings")) {
             ImGui::PushItemWidth(-1);
             if(mode==1 || mode==3) {
-                ImGui::TextDisabled("Arrow length");ImGui::DragFloat("##arrow_length",&arrowLength,scale*.001f,scale*.001f,scale*.3f,"%.4g",ImGuiSliderFlags_AlwaysClamp);
+                RayFEM::UI::FieldLabel("Arrow length");ImGui::DragFloat("##arrow_length",&arrowLength,scale*.001f,scale*.001f,scale*.3f,"%.4g",ImGuiSliderFlags_AlwaysClamp);
                 Tip("Arrows use a common length to reveal direction. Color indicates vector magnitude.");
             }
             if(mode>=2) {
-                ImGui::TextDisabled("Maximum path length");ImGui::DragFloat("##path_length",&pathLength,scale*.01f,scale*.02f,scale*20,"%.4g",ImGuiSliderFlags_AlwaysClamp);
-                ImGui::TextDisabled("Step length");ImGui::DragFloat("##step_length",&stepLength,scale*.0005f,scale*.001f,scale*.2f,"%.4g",ImGuiSliderFlags_AlwaysClamp);
-                ImGui::TextDisabled("Integration");ImGui::Combo("##integrator",&integrator,"RK2\0RK4\0");
+                RayFEM::UI::FieldLabel("Maximum path length");ImGui::DragFloat("##path_length",&pathLength,scale*.01f,scale*.02f,scale*20,"%.4g",ImGuiSliderFlags_AlwaysClamp);
+                RayFEM::UI::FieldLabel("Step length");ImGui::DragFloat("##step_length",&stepLength,scale*.0005f,scale*.001f,scale*.2f,"%.4g",ImGuiSliderFlags_AlwaysClamp);
+                RayFEM::UI::FieldLabel("Integration");ImGui::Combo("##integrator",&integrator,"RK2\0RK4\0");
                 ImGui::Checkbox("Both directions",&bidirectional);
                 ImGui::Checkbox("Moving highlight",&tracers);
                 Tip("A bright pulse travels along each steady streamline to show direction. It does not represent a particle trajectory across simulation frames.");
                 if(tracers) {
                     float percent=pulseLength*100;
-                    ImGui::TextDisabled("Pulse length");
+                    RayFEM::UI::FieldLabel("Pulse length");
                     if(ImGui::SliderFloat("##pulse_length",&percent,3,40,"%.0f%%",ImGuiSliderFlags_AlwaysClamp))pulseLength=percent/100;
                     ImGui::Checkbox("Thicken highlight",&thickenPulse);
                 }

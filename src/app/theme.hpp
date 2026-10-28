@@ -2,6 +2,7 @@
 
 #include "imgui.h"
 #include "raylib.h"
+#include <algorithm>
 #include <array>
 #include <cstddef>
 
@@ -85,6 +86,18 @@ inline const ThemePalette& Palette(){return current_theme==ThemeMode::Light?ligh
 inline ImVec4 ThemeText(ImU32 color){return ImGui::ColorConvertU32ToFloat4(color);}
 inline ImU32 ThemeSeriesColor(std::size_t index){const auto& colors=Palette().series;return colors[index%colors.size()];}
 inline Color ThemeAlpha(Color color,unsigned char alpha){color.a=alpha;return color;}
+
+// Label the next widget in a left column and let the widget fill the row.
+// A label too wide for the column keeps its own line above the widget.
+inline void FieldLabel(const char* label) {
+    const float start=ImGui::GetCursorPosX();
+    const float column=std::max(84.0f,ImGui::GetContentRegionAvail().x*.38f);
+    const bool inlineLabel=ImGui::CalcTextSize(label).x+ImGui::GetStyle().ItemSpacing.x<=column;
+    if(inlineLabel)ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s",label);
+    if(inlineLabel)ImGui::SameLine(start+column);
+    ImGui::SetNextItemWidth(-1);
+}
 
 inline ImU32 WithAlpha(ImU32 color,unsigned char alpha){return (color&~IM_COL32_A_MASK)|(ImU32(alpha)<<IM_COL32_A_SHIFT);}
 
