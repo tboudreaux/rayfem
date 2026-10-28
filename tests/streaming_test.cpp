@@ -365,6 +365,27 @@ int main(int argc, char** argv) {
             }
             require(large.front()->displacement->Size() == large_vector_space.GetVSize(), "Large displacement changed coefficient count");
         }
+        {
+            // Paused receiving skips frames but keeps mesh registrations.
+            server.fetchFrames(64);
+            server.setReceiving(false);
+            require(!server.receiving(), "Receiving did not pause");
+            const size_t skipped = server.getSkippedFrameCount();
+            require(client.sendMesh(12, mesh), client.getLastError());
+            RayFEM::FrameMetadata paused;
+            for (uint32_t index = 0; index < 3; ++index) {
+                paused.frame_index = index;
+                require(client.sendFrame(12, fields, paused), client.getLastError());
+            }
+            waitFor([&] { return server.getSkippedFrameCount() >= skipped + 3; }, "Paused frames were not counted as skipped");
+            require(server.fetchFrames(64).empty() && server.getPendingFrameCount() == 0, "Frames were delivered while paused");
+            server.setReceiving(true);
+            paused.frame_index = 3;
+            require(client.sendFrame(12, fields, paused), client.getLastError());
+            auto resumed = receive(server, 1);
+            require(resumed.front()->metadata.frame_index == 3 && resumed.front()->fields.size() == fields.size(),
+                    "Frames after resuming did not decode with the mesh registered while paused");
+        }
         std::cout << "Streaming checks passed: curvilinear geometry, five FE spaces, shared meshes, atomic fields, displacement, burst queue, malformed input, restart, NURBS, and 148225-DOF multi-field frames.\n";
         return 0;
     } catch (const std::exception& error) {

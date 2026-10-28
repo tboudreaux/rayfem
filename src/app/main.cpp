@@ -649,19 +649,31 @@ private:
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s",text);
     }
 
+    // Connection state; clicking it pauses or resumes receiving frames.
     void DrawStatusIndicator(const std::string& label) {
         const auto& palette=RayFEM::UI::Palette();
-        const ImU32 color=server.ready()?palette.success:palette.warning;
+        const bool paused=!server.receiving();
+        const ImU32 color=paused||!server.ready()?palette.warning:palette.success;
         ImGui::AlignTextToFramePadding();
         const ImVec2 position=ImGui::GetCursorScreenPos();
         const float radius=ImGui::CalcTextSize(ICON_FA_CIRCLE).x*.3f;
-        const float center=position.y+ImGui::GetFrameHeight()*.5f;
-        ImGui::GetWindowDrawList()->AddCircleFilled({position.x+radius,center},radius,color);
-        ImGui::Dummy({radius*2,0});ImGui::SameLine(0,ImGui::GetStyle().ItemInnerSpacing.x);
-        ImGui::TextColored(RayFEM::UI::ThemeText(color),"%s",label.c_str());
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-            ImGui::SetTooltip(server.ready()?"Waiting for frames on %s:%d. Received %zu so far.":"Starting the stream listener on %s:%d (%zu frames).",
-                              opts.listen.c_str(),opts.port,server.getReceivedFrameCount());
+        const float spacing=ImGui::GetStyle().ItemInnerSpacing.x;
+        const ImVec2 size{radius*2+spacing+ImGui::CalcTextSize(label.c_str()).x,ImGui::GetFrameHeight()};
+        if(ImGui::InvisibleButton("##stream_status",size)) server.setReceiving(paused);
+        const bool hovered=ImGui::IsItemHovered();
+        auto* draw=ImGui::GetWindowDrawList();
+        if(hovered) draw->AddRectFilled({position.x-6,position.y},{position.x+size.x+6,position.y+size.y},RayFEM::UI::WithAlpha(palette.text,16),RayFEM::UI::ControlRounding);
+        const float center=position.y+size.y*.5f;
+        if(paused) {
+            draw->AddRectFilled({position.x,center-radius},{position.x+radius*.7f,center+radius},color);
+            draw->AddRectFilled({position.x+radius*1.3f,center-radius},{position.x+radius*2,center+radius},color);
+        } else draw->AddCircleFilled({position.x+radius,center},radius,color);
+        draw->AddText({position.x+radius*2+spacing,center-ImGui::GetTextLineHeight()*.5f},color,label.c_str());
+        if (hovered) {
+            if(paused) ImGui::SetTooltip("Not receiving frames; %zu skipped so far. Click to resume.",server.getSkippedFrameCount());
+            else ImGui::SetTooltip(server.ready()?"Receiving frames on %s:%d (%zu so far). Click to pause.":"Starting the stream listener on %s:%d (%zu frames).",
+                                   opts.listen.c_str(),opts.port,server.getReceivedFrameCount());
+        }
     }
 
     void DrawUI() {
@@ -672,7 +684,8 @@ private:
         const char* openLabel=ICON_FA_FOLDER_OPEN "  Open";
         const char* themeLabel=light?ICON_FA_MOON "###theme":ICON_FA_SUN "###theme";
         const char* infoLabel=ICON_FA_CIRCLE_INFO "###info";
-        const std::string statusLabel=server.ready()?"Listening on :"+std::to_string(opts.port):"Starting listener";
+        const std::string statusLabel=!server.receiving()?"Paused · "+std::to_string(server.getSkippedFrameCount())+" skipped":
+            server.ready()?"Listening on :"+std::to_string(opts.port):"Starting listener";
         const auto& style=ImGui::GetStyle();
         auto buttonWidth=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+style.FramePadding.x*2;};
         const float statusWidth=ImGui::CalcTextSize(ICON_FA_CIRCLE).x*.6f+style.ItemInnerSpacing.x+ImGui::CalcTextSize(statusLabel.c_str()).x;
@@ -709,6 +722,11 @@ private:
         Tip("Session details, statistics and mouse controls");
         if (ImGui::BeginPopup("Session info")) {
             ImGui::SeparatorText("Stream");
+            bool receiving=server.receiving();
+            if(RayFEM::UI::Switch("Receive frames",&receiving)) server.setReceiving(receiving);
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                ImGui::SetTooltip("Turn off to stop taking new frames, for example to inspect the current history. Mesh registrations are still kept.");
+            if(!receiving) ImGui::TextDisabled("%zu frames skipped while paused",server.getSkippedFrameCount());
             ImGui::Text("%s:%d",opts.listen.c_str(),opts.port);
             ImGui::Text("%zu received / %zu queued",server.getReceivedFrameCount(),server.getPendingFrameCount());
             ImGui::Text("%zu dropped / %zu errors",server.getDroppedFrameCount(),server.getErrorCount());
@@ -1515,6 +1533,8 @@ private:
 
         struct Chip { std::string label; const char* tip; };
         std::vector<Chip> chips;
+        if(!server.receiving())
+            chips.push_back({ICON_FA_PAUSE "  Stream paused","New frames are skipped. Resume from the status at the top right or the Info menu."});
         if(active && surfaceBuilding)
             chips.push_back({ICON_FA_ARROWS_ROTATE "  Updating","The last finished surface is shown while the current frame and settings are built."});
         if(const auto frame=Current()) {

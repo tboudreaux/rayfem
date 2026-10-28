@@ -272,7 +272,8 @@ struct Server::Impl {
     std::atomic<bool> is_ready{false};
     std::atomic<bool> viewer_ready{false};
     std::atomic<bool> shutdown_requested{false};
-    std::atomic<size_t> received{0}, dropped{0}, errors{0};
+    std::atomic<size_t> received{0}, dropped{0}, errors{0}, skipped{0};
+    std::atomic<bool> receiving{true};
     mutable std::mutex mutex;
     std::string last_error;
     std::deque<SerializedFrame> queue;
@@ -403,6 +404,7 @@ struct Server::Impl {
                 if (mesh->has_frame && header.metadata.frame_index <= mesh->last_frame) {
                     error("Stale or duplicate frame index"); continue;
                 }
+                if (!receiving) { ++skipped; continue; }
                 SerializedFrame frame;
                 frame.header = header;
                 frame.mesh = mesh;
@@ -521,6 +523,16 @@ size_t Server::getReceivedFrameCount() const { return m_impl->received; }
 size_t Server::getDroppedFrameCount() const { return m_impl->dropped; }
 size_t Server::getErrorCount() const { return m_impl->errors; }
 size_t Server::getPendingFrameCount() const { std::lock_guard lock(m_impl->mutex); return m_impl->queue.size(); }
+void Server::setReceiving(bool receiving) {
+    m_impl->receiving = receiving;
+    if (receiving) return;
+    std::lock_guard lock(m_impl->mutex);
+    m_impl->skipped += m_impl->queue.size();
+    m_impl->queue.clear();
+    m_impl->queued_bytes = 0;
+}
+bool Server::receiving() const { return m_impl->receiving; }
+size_t Server::getSkippedFrameCount() const { return m_impl->skipped; }
 bool Server::ready() const { return m_impl->is_ready; }
 void Server::markViewerReady(bool ready) { m_impl->viewer_ready = ready; }
 bool Server::shutdownRequested() const { return m_impl->shutdown_requested; }

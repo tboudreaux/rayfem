@@ -25,6 +25,12 @@ public:
     size_t getDroppedFrameCount() const;
     size_t getErrorCount() const;
     size_t getPendingFrameCount() const;
+    // While not receiving, frames are counted and dropped (including any
+    // already queued); mesh registrations are still kept, so frames that
+    // arrive after receiving resumes decode normally.
+    void setReceiving(bool receiving);
+    bool receiving() const;
+    size_t getSkippedFrameCount() const;
     bool ready() const;
     // Only mark ready after the desktop graphics/UI initialization succeeds.
     void markViewerReady(bool ready = true);
