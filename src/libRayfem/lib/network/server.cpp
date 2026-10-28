@@ -4,6 +4,9 @@
 #include "libRayfem/threading.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -106,9 +109,9 @@ using detail::validateMeshText;
 using detail::MaxNURBSOrder;
 
 // MFEM's text loader does not validate VDim/Ordering before allocating. Validate
-// those values and read the solution explicitly so truncated/nonfinite data
-// cannot silently become an apparently valid frame.
-std::unique_ptr<mfem::GridFunction> decodeField(mfem::Mesh& mesh, const std::string& data) {
+// those values before loading a space from text.
+void validateSpaceHeader(mfem::Mesh& mesh, std::string_view text) {
+    const std::string data(text);
     std::istringstream preflight(data);
     std::string format, collection_line, dimension_line, ordering_line;
     std::getline(preflight, format);
@@ -144,22 +147,120 @@ std::unique_ptr<mfem::GridFunction> decodeField(mfem::Mesh& mesh, const std::str
             }
         }
     }
-    std::istringstream stream(data);
-    auto space = std::make_unique<mfem::FiniteElementSpace>();
-    auto collection = std::unique_ptr<mfem::FiniteElementCollection>(space->Load(&mesh, stream));
-    if (stream.fail() || space->GetVSize() < 1 || static_cast<size_t>(space->GetVSize()) > data.size())
-        throw std::runtime_error("Truncated or invalid finite element space");
-    auto result = std::make_unique<mfem::GridFunction>(space.get());
-    result->MakeOwner(collection.release());
-    space.release();
-    for (int i = 0; i < result->Size(); ++i) {
-        double value = 0;
-        if (!(stream >> value) || !std::isfinite(value))
-            throw std::runtime_error("Truncated or non-finite grid function");
-        (*result)(i) = value;
+}
+
+// A decoded space shared by every field of a mesh registration with the same
+// header, so each frame does not rebuild identical DOF tables.
+struct DecodedSpace {
+    std::shared_ptr<mfem::Mesh> mesh;
+    std::string header;
+    std::unique_ptr<mfem::FiniteElementCollection> collection;
+    std::unique_ptr<mfem::FiniteElementSpace> space;
+};
+struct SpaceHolder { std::shared_ptr<DecodedSpace> shared; };
+// Keeps its space alive; the base order destroys the field before the space.
+class DecodedField : private SpaceHolder, public mfem::GridFunction {
+public:
+    explicit DecodedField(std::shared_ptr<DecodedSpace> space)
+        : SpaceHolder{std::move(space)}, mfem::GridFunction(shared->space.get()) {}
+};
+using SpaceCache = std::vector<std::weak_ptr<DecodedSpace>>;
+
+std::shared_ptr<DecodedSpace> cachedSpace(SpaceCache& cache, const std::shared_ptr<mfem::Mesh>& mesh,
+                                          std::string_view data, bool exact) {
+    std::erase_if(cache, [](const auto& entry) { return entry.expired(); });
+    for (const auto& entry : cache) {
+        auto space = entry.lock();
+        if (space && space->mesh == mesh && (exact ? data == space->header : data.starts_with(space->header))) return space;
     }
-    stream >> std::ws;
-    if (!stream.eof()) throw std::runtime_error("Unexpected data after grid function");
+    return nullptr;
+}
+
+std::shared_ptr<DecodedSpace> loadSpace(SpaceCache& cache, const std::shared_ptr<mfem::Mesh>& mesh,
+                                        std::string header) {
+    validateSpaceHeader(*mesh, header);
+    auto result = std::make_shared<DecodedSpace>();
+    result->mesh = mesh;
+    std::istringstream stream(header);
+    result->space = std::make_unique<mfem::FiniteElementSpace>();
+    result->collection.reset(result->space->Load(mesh.get(), stream));
+    if (stream.bad() || !result->collection || result->space->GetVSize() < 1)
+        throw std::runtime_error("Truncated or invalid finite element space");
+    result->header = std::move(header);
+    cache.push_back(result);
+    return result;
+}
+
+void readValues(std::string_view text, mfem::GridFunction& field) {
+    const char* cursor = text.data();
+    const char* const end = text.data() + text.size();
+    auto skip = [&] { while (cursor < end && std::isspace(static_cast<unsigned char>(*cursor))) ++cursor; };
+    for (int i = 0; i < field.Size(); ++i) {
+        skip();
+        double value = 0;
+        const auto parsed = std::from_chars(cursor, end, value);
+        if (parsed.ec != std::errc{} || !std::isfinite(value))
+            throw std::runtime_error("Truncated or non-finite grid function");
+        field(i) = value;
+        cursor = parsed.ptr;
+    }
+    skip();
+    if (cursor != end) throw std::runtime_error("Unexpected data after grid function");
+}
+
+struct DecodedFieldResult { std::unique_ptr<mfem::GridFunction> field; bool shared_space = false; };
+
+// MFEM text (GridFunction::Save) or the binary layout in packet.hpp.
+DecodedFieldResult decodeField(const std::shared_ptr<mfem::Mesh>& mesh, const std::string& data,
+                               bool binary, SpaceCache& cache) {
+    DecodedFieldResult result;
+    std::shared_ptr<DecodedSpace> space;
+    std::string_view values;
+    if (binary) {
+        const std::string_view bytes(data);
+        size_t pos = Protocol::BinaryFieldMagic.size();
+        uint64_t header_size = 0, count = 0;
+        if (!bytes.starts_with(Protocol::BinaryFieldMagic) || !Protocol::readInteger(bytes, pos, 4, header_size) ||
+            header_size == 0 || header_size > Protocol::MaxSpaceHeaderBytes || header_size > bytes.size() - pos)
+            throw std::runtime_error("Invalid binary field header");
+        const auto header = bytes.substr(pos, header_size);
+        pos += header_size;
+        if (!Protocol::readInteger(bytes, pos, 8, count) || count != (bytes.size() - pos)/8 || (bytes.size() - pos)%8)
+            throw std::runtime_error("Truncated binary field values");
+        space = cachedSpace(cache, mesh, header, true);
+        result.shared_space = bool(space);
+        if (!space) space = loadSpace(cache, mesh, std::string(header));
+        if (count != static_cast<uint64_t>(space->space->GetVSize()))
+            throw std::runtime_error("Binary field size does not match its finite element space");
+        auto field = std::make_unique<DecodedField>(space);
+        for (int i = 0; i < field->Size(); ++i) {
+            uint64_t bits = 0;
+            Protocol::readInteger(bytes, pos, 8, bits);
+            const double value = std::bit_cast<double>(bits);
+            if (!std::isfinite(value)) throw std::runtime_error("Non-finite grid function value");
+            (*field)(i) = value;
+        }
+        result.field = std::move(field);
+        return result;
+    }
+    space = cachedSpace(cache, mesh, data, false);
+    result.shared_space = bool(space);
+    if (!space) {
+        // Find where MFEM's loader stops reading the space, then cache that
+        // exact header text for later frames.
+        validateSpaceHeader(*mesh, data);
+        std::istringstream stream(data);
+        mfem::FiniteElementSpace probe;
+        std::unique_ptr<mfem::FiniteElementCollection> collection(probe.Load(mesh.get(), stream));
+        const auto end = stream.tellg();
+        if (stream.fail() || end <= 0 || probe.GetVSize() < 1 || static_cast<size_t>(probe.GetVSize()) > data.size())
+            throw std::runtime_error("Truncated or invalid finite element space");
+        space = loadSpace(cache, mesh, data.substr(0, static_cast<size_t>(end)));
+    }
+    values = std::string_view(data).substr(space->header.size());
+    auto field = std::make_unique<DecodedField>(space);
+    readValues(values, *field);
+    result.field = std::move(field);
     return result;
 }
 } // namespace
@@ -175,6 +276,7 @@ struct Server::Impl {
     mutable std::mutex mutex;
     std::string last_error;
     std::deque<SerializedFrame> queue;
+    SpaceCache spaces;  // fetchFrames caller only
     size_t queued_bytes = 0;
     std::thread worker;
 
@@ -377,17 +479,23 @@ std::vector<std::shared_ptr<RenderFrame>> Server::fetchFrames(size_t max_frames)
             frame->mesh_revision = serialized.header.mesh_revision;
             frame->mesh = std::move(mesh);
             frame->estimated_mesh_bytes = serialized.mesh->estimated_bytes;
+            const bool binary = serialized.header.flags & Protocol::BinaryFields;
             for (const auto& [name, data] : serialized.fields) {
-                frame->fields.push_back({name, decodeField(*frame->mesh, data)});
-                frame->estimated_bytes += estimateFieldBytes(*frame->fields.back().gf, data.size());
+                auto decoded = decodeField(frame->mesh, data, binary, m_impl->spaces);
+                // A shared space is counted once, with the frame that decoded it.
+                frame->estimated_bytes += decoded.shared_space ? decoded.field->Size()*sizeof(mfem::real_t) :
+                    estimateFieldBytes(*decoded.field, data.size());
+                frame->fields.push_back({name, std::move(decoded.field)});
             }
             if (!serialized.displacement.empty()) {
-                frame->displacement = decodeField(*frame->mesh, serialized.displacement);
+                auto decoded = decodeField(frame->mesh, serialized.displacement, binary, m_impl->spaces);
+                frame->displacement = std::move(decoded.field);
                 auto* space = frame->displacement->FESpace();
                 if (space->GetVDim() != frame->mesh->SpaceDimension() ||
                     space->FEColl()->GetRangeType(frame->mesh->Dimension()) != mfem::FiniteElement::SCALAR)
                     throw std::runtime_error("Displacement must be a pointwise vector field");
-                frame->estimated_bytes += estimateFieldBytes(*frame->displacement, serialized.displacement.size());
+                frame->estimated_bytes += decoded.shared_space ? frame->displacement->Size()*sizeof(mfem::real_t) :
+                    estimateFieldBytes(*frame->displacement, serialized.displacement.size());
             }
             ++m_impl->received;
             result.push_back(std::move(frame));

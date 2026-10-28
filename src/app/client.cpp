@@ -34,6 +34,7 @@ struct Options {
     std::string motion = "rotation";
     bool no_displacement = false;
     bool quiet = false;
+    bool text_fields = false;
     std::uint64_t mesh_id = 1;
 };
 
@@ -173,6 +174,7 @@ int stream(const Options& options) {
         {"flux (RT / Hdiv)", &flux}
     };
     RayFEM::Client client(options.host, static_cast<std::size_t>(options.port));
+    client.setBinaryFields(!options.text_fields);
     if (!client.sendMesh(options.mesh_id, *mesh)) {
         throw std::runtime_error("Failed to send mesh: " + client.getLastError());
     }
@@ -259,6 +261,7 @@ int main(int argc, char** argv) {
         ->check(CLI::IsMember({"rotation", "ellipsoid"}));
     app.add_flag("--no-displacement", options.no_displacement, "Send undeformed frames");
     app.add_flag("--quiet", options.quiet, "Only print the stream summary");
+    app.add_flag("--text-fields", options.text_fields, "Send fields as MFEM text (for viewers without binary fields)");
     app.add_option("--mesh-id", options.mesh_id, "Identifier used for mesh reuse");
     CLI11_PARSE(app, argc, argv);
     if (fps->count() != 0) { options.interval = 1.0 / options.fps; }

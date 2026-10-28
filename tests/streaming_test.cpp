@@ -1,6 +1,7 @@
 #include "libRayfem/network/client.hpp"
 #include "libRayfem/network/server.hpp"
 #include "libRayfem/network/zmq.hpp"
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -39,6 +40,15 @@ void sendRaw(RayFEM::SocketPtr& socket, RayFEM::Protocol::Header header, const s
     const int status = zframe_send(&raw, socket, 0);
     if (raw) zframe_destroy(&raw);
     require(status == 0, "Could not send test packet");
+}
+std::string binaryField(const std::string& header, uint64_t count, const std::vector<double>& values,
+                        std::string_view magic = RayFEM::Protocol::BinaryFieldMagic) {
+    std::string out(magic);
+    RayFEM::Protocol::appendInteger(out, header.size(), 4);
+    out += header;
+    RayFEM::Protocol::appendInteger(out, count, 8);
+    for (double value : values) RayFEM::Protocol::appendInteger(out, std::bit_cast<uint64_t>(value), 8);
+    return out;
 }
 std::string fieldPayload(const std::string& name, const std::string& data) {
     std::string payload;
@@ -134,6 +144,26 @@ int main(int argc, char** argv) {
             shared_history_bytes += frame->estimated_bytes;
         }
         require(RayFEM::EstimateHistoryBytes(first) == shared_history_bytes, "Shared mesh must be counted once in history estimate");
+        // Binary frames of one registration share their decoded spaces, and
+        // later frames count only their coefficients.
+        for (size_t j = 0; j < fields.size(); ++j)
+            require(first[2]->fields[j].gf->FESpace() == first[0]->fields[j].gf->FESpace(), "Frames did not share a decoded space");
+        require(first[2]->estimated_bytes < first[0]->estimated_bytes, "Shared spaces were counted for every frame");
+        // MFEM text remains supported, decodes to the same values, and shares spaces too.
+        client.setBinaryFields(false);
+        require(client.sendMesh(8, mesh), client.getLastError());
+        for (uint32_t index = 0; index < 2; ++index) {
+            metadata.frame_index = index;
+            require(client.sendFrame(8, fields, metadata, &displacement), client.getLastError());
+        }
+        client.setBinaryFields(true);
+        auto text = receive(server, 2);
+        for (const auto& frame : text)
+            for (size_t j = 0; j < fields.size(); ++j)
+                for (int k = 0; k < frame->fields[j].gf->Size(); ++k)
+                    require((*frame->fields[j].gf)[k] == (*first[0]->fields[j].gf)[k], "Text and binary fields decoded differently");
+        require(text[1]->fields[0].gf->FESpace() == text[0]->fields[0].gf->FESpace(), "Text frames did not share a decoded space");
+        metadata.frame_index = 2;
         for (uint32_t index = 3; index < 123; ++index) {
             metadata.frame_index = index;
             scalar = double(index);
@@ -184,6 +214,31 @@ int main(int argc, char** argv) {
         errors = server.getErrorCount();
         sendRaw(raw, header, fieldPayload("trailing bytes", "invalid") + "unexpected");
         waitFor([&] { return server.getErrorCount() > errors; }, "Trailing packet bytes were not rejected");
+        {
+            const std::string space = "FiniteElementSpace\nFiniteElementCollection: H1_2D_P3\nVDim: 1\nOrdering: 0\n";
+            const std::vector<double> ones(100, 1.0), short_values(99, 1.0);
+            std::vector<double> invalid(100, 1.0);
+            invalid[50] = std::nan("");
+            header.flags = RayFEM::Protocol::BinaryFields;
+            header.metadata.frame_index = 4;
+            sendRaw(raw, header, fieldPayload("binary", binaryField(space, 100, ones)));
+            auto binary = receive(server, 1);
+            require(binary.front()->fields[0].gf->Size() == 100 && (*binary.front()->fields[0].gf)[99] == 1.0, "Valid binary field was not decoded");
+            const std::pair<std::string, std::string> rejected[] = {
+                {"bad magic", binaryField(space, 100, ones, "XXXX")},
+                {"truncated values", binaryField(space, 100, short_values)},
+                {"size mismatch", binaryField(space, 99, short_values)},
+                {"non-finite", binaryField(space, 100, invalid)},
+                {"bad space", binaryField("FiniteElementSpace\nFiniteElementCollection: H1_2D_P3\nVDim: -1\nOrdering: 0\n", 100, ones)},
+            };
+            for (const auto& [name, data] : rejected) {
+                ++header.metadata.frame_index;
+                errors = server.getErrorCount();
+                sendRaw(raw, header, fieldPayload(name, data));
+                waitFor([&] { server.fetchFrames(); return server.getErrorCount() > errors; }, "Malformed binary field was accepted: " + name);
+            }
+            header.flags = 0;
+        }
         auto rejectMesh = [&](uint64_t id, const std::string& data) {
             header.kind = RayFEM::Protocol::Kind::Mesh;
             header.mesh_id = id;

@@ -23,6 +23,13 @@ inline constexpr size_t MaxPayloadBytes = 64 * 1024 * 1024;
 inline constexpr size_t MaxFields = 64;
 inline constexpr size_t MaxNameBytes = 255;
 inline constexpr uint32_t HasDisplacement = 1;
+// Fields (and displacement) use the binary layout below instead of MFEM text:
+// "RFB1", u32 header length, the FiniteElementSpace::Save header text,
+// u64 value count, then each value as the u64 bits of an IEEE double. All
+// integers are big-endian, like the packet header.
+inline constexpr uint32_t BinaryFields = 2;
+inline constexpr std::string_view BinaryFieldMagic{"RFB1", 4};
+inline constexpr size_t MaxSpaceHeaderBytes = 1024 * 1024;
 enum class Kind : uint16_t { Mesh = 1, Frame = 2 };
 
 struct Header {
@@ -82,7 +89,7 @@ inline bool decodeHeader(std::string_view data, Header& header, std::string& err
     std::memcpy(header.metadata.label, data.data() + pos, sizeof(header.metadata.label));
     header.metadata.label[sizeof(header.metadata.label) - 1] = '\0';
     if (!header.session_id || !header.mesh_revision) return fail("Missing stream identity or mesh revision");
-    if (header.flags & ~HasDisplacement) return fail("Unknown packet flags");
+    if (header.flags & ~(HasDisplacement | BinaryFields)) return fail("Unknown packet flags");
     if (!std::isfinite(header.metadata.sim_time)) return fail("Non-finite frame time");
     if (header.payload_bytes > MaxPayloadBytes || header.payload_bytes != data.size() - HeaderBytes)
         return fail("Invalid or oversized payload length");

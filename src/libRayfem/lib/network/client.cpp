@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <bit>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -16,6 +17,20 @@ std::string saveField(const mfem::GridFunction& gf) {
     stream << std::setprecision(17);
     gf.Save(stream);
     return stream.str();
+}
+std::string saveBinaryField(const mfem::GridFunction& gf) {
+    std::ostringstream header;
+    header << std::setprecision(17);
+    gf.FESpace()->Save(header);
+    const std::string text = header.str();
+    std::string out(Protocol::BinaryFieldMagic);
+    out.reserve(4 + 4 + text.size() + 8 + 8*static_cast<size_t>(gf.Size()));
+    Protocol::appendInteger(out, text.size(), 4);
+    out += text;
+    Protocol::appendInteger(out, static_cast<uint64_t>(gf.Size()), 8);
+    const double* values = gf.HostRead();
+    for (int i = 0; i < gf.Size(); ++i) Protocol::appendInteger(out, std::bit_cast<uint64_t>(values[i]), 8);
+    return out;
 }
 bool finiteField(const mfem::GridFunction& gf) {
     for (int i = 0; i < gf.Size(); ++i) if (!std::isfinite(gf(i))) return false;
@@ -92,7 +107,7 @@ bool Client::sendFrame(uint64_t mesh_id, const std::vector<NamedField>& fields,
         if (field.name.empty() || field.name.size() > Protocol::MaxNameBytes || field.name.find('\0') != std::string::npos || !names.insert(field.name).second)
             return fail("Field names must be unique, nonempty, and at most 255 bytes");
         if (!valid(field.gf)) return fail("Field is invalid, non-finite, or belongs to a different mesh");
-        std::string data = saveField(*field.gf);
+        std::string data = m_binaryFields ? saveBinaryField(*field.gf) : saveField(*field.gf);
         if (payload.size() + 12 + field.name.size() + data.size() > Protocol::MaxPayloadBytes)
             return fail("Frame exceeds 64 MiB payload limit");
         Protocol::appendInteger(payload, field.name.size(), 4);
@@ -104,7 +119,7 @@ bool Client::sendFrame(uint64_t mesh_id, const std::vector<NamedField>& fields,
         if (!valid(displacement) || displacement->FESpace()->GetVDim() != mesh->SpaceDimension() ||
             displacement->FESpace()->FEColl()->GetRangeType(mesh->Dimension()) != mfem::FiniteElement::SCALAR)
             return fail("Displacement must be a pointwise vector field on the registered mesh");
-        std::string data = saveField(*displacement);
+        std::string data = m_binaryFields ? saveBinaryField(*displacement) : saveField(*displacement);
         if (payload.size() + 8 + data.size() > Protocol::MaxPayloadBytes) return fail("Frame exceeds 64 MiB payload limit");
         Protocol::appendInteger(payload, data.size(), 8);
         payload += data;
@@ -115,7 +130,7 @@ bool Client::sendFrame(uint64_t mesh_id, const std::vector<NamedField>& fields,
     header.mesh_revision = registration.revision;
     header.metadata = metadata;
     header.field_count = static_cast<uint32_t>(fields.size());
-    header.flags = displacement ? Protocol::HasDisplacement : 0;
+    header.flags = (displacement ? Protocol::HasDisplacement : 0) | (m_binaryFields ? Protocol::BinaryFields : 0);
     if (!sendPacket(header, payload)) return false;
     registration.last_frame = metadata.frame_index;
     registration.has_frame = true;

@@ -25,6 +25,9 @@ public:
     bool sendMesh(uint64_t mesh_id, mfem::Mesh& mesh);
     bool sendFrame(uint64_t mesh_id, const std::vector<NamedField>& fields,
                    const FrameMetadata& metadata, mfem::GridFunction* displacement = nullptr);
+    // Binary fields (the default) decode far faster and are about a third the
+    // size of MFEM text. Viewers older than the binary encoding need text.
+    void setBinaryFields(bool binary) { m_binaryFields = binary; }
     // Compatibility helper: registers fresh geometry and sends a single field.
     bool send(mfem::Mesh& mesh, mfem::GridFunction& gf, const FrameMetadata& metadata);
     const std::string& getLastError() const { return m_lastError; }
@@ -46,5 +49,6 @@ private:
     uint64_t m_nextRevision = 0;
     std::unordered_map<uint64_t, Registration> m_meshes;
     std::string m_lastError;
+    bool m_binaryFields = true;
 };
 } // namespace RayFEM
