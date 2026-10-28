@@ -26,12 +26,11 @@ struct ElementPickStats { std::size_t boxes_tested = 0, triangles_tested = 0; };
 
 // Index the actual displayed triangle soup, including curved tessellation,
 // displacement, clipping caps and exploded interior faces. No graphics context
-// is needed. Positions are borrowed: build from Model.meshes[0].vertices after
-// UploadSurface, and keep that Model's CPU vertex buffer alive and unchanged
-// for this index's lifetime. Moving the Model/cache entry is safe.
+// is needed. The index owns its triangle positions, so the source buffers can
+// be freed or welded for upload once it is built.
 class ElementPicker {
 public:
-    void Build(std::span<const float> positions, std::span<const int> element_ids) {
+    void Build(std::vector<float> positions, std::span<const int> element_ids) {
         positions_ = {};
         groups_.clear(); group_lookup_.clear(); triangles_.clear(); order_.clear(); nodes_.clear();
         if (positions.size()%9 || element_ids.size() != positions.size()/9) {
@@ -73,7 +72,7 @@ public:
         std::iota(order_.begin(), order_.end(), std::uint32_t{0});
         nodes_.reserve(groups_.size()*2);
         if (!groups_.empty()) { BuildNode(0, groups_.size()); }
-        positions_ = positions;
+        positions_ = std::move(positions);
     }
 
     bool Empty() const { return nodes_.empty(); }
@@ -84,7 +83,7 @@ public:
         return std::span<const std::uint32_t>(triangles_).subspan(group.first, group.count);
     }
     std::size_t StorageBytes() const {
-        return triangles_.capacity()*sizeof(std::uint32_t) + order_.capacity()*sizeof(std::uint32_t) +
+        return positions_.capacity()*sizeof(float) + triangles_.capacity()*sizeof(std::uint32_t) + order_.capacity()*sizeof(std::uint32_t) +
             groups_.capacity()*sizeof(Group) + nodes_.capacity()*sizeof(Node) +
             group_lookup_.size()*(sizeof(int)+sizeof(std::size_t)+3*sizeof(void*));
     }
@@ -162,7 +161,7 @@ private:
     };
     struct Group { int element; Box bounds; std::size_t first, count; };
     struct Node { Box bounds; std::size_t first, last; int left=-1, right=-1; };
-    std::span<const float> positions_;
+    std::vector<float> positions_;
     std::vector<Group> groups_;
     std::unordered_map<int,std::size_t> group_lookup_;
     std::vector<std::uint32_t> triangles_, order_;

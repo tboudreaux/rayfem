@@ -361,10 +361,11 @@ private:
                 result.dofs = SampleDofs(mesh, *field, options, 20000, result.retained.empty() ? nullptr : &result.retained);
                 result.dofs_ready = true;
             }
-            if (!result.data.positions.empty())
-                result.picker.Build(result.data.positions, result.data.element_ids);
             result.vertex_count = result.data.positions.size()/3;
             result.indexed = WeldSurface(result.data);
+            // The picker keeps the triangle positions; the rest is freed below.
+            if (!result.data.positions.empty())
+                result.picker.Build(std::move(result.data.positions), result.data.element_ids);
             auto& data = result.data;
             for (auto* buffer : {&data.positions, &data.normals}) std::vector<float>().swap(*buffer);
             std::vector<unsigned char>().swap(data.colors);

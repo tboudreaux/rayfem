@@ -42,6 +42,14 @@ void NearestAndInvalid() {
     Check(picker.TrianglesForElement(17).size()==1 && picker.TrianglesForElement(17)[0]==0,"Grouped owner triangle lookup");
     Check(picker.TrianglesForElement(99).empty(),"Unknown owner lookup is empty");
     Check(!picker.Pick({{.2f,.2f,3},{0,0,1}}),"Triangles behind camera are not selectable");
+    {
+        // The surface worker frees its buffers after building the index.
+        std::vector<float> source=positions;
+        RayFEM::UI::ElementPicker owned;owned.Build(source,owners);
+        std::fill(source.begin(),source.end(),99.f);std::vector<float>().swap(source);
+        const auto kept=owned.Pick({{.2f,.2f,3},{0,0,-7}});
+        Check(kept && kept->element==3,"Picking survives the source buffer being freed");
+    }
     Check(!picker.Pick({{2,2,3},{0,0,-1}}),"Empty viewport ray misses");
     Check(!picker.Pick({{.2f,.2f,3},{0,0,0}}),"Zero direction misses safely");
     Check(!picker.Pick({{NAN,0,0},{0,0,-1}}),"Nonfinite origin misses safely");
