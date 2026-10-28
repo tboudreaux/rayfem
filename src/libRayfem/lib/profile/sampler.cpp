@@ -1,4 +1,5 @@
 #include "libRayfem/profile/sampler.hpp"
+#include "libRayfem/threading.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -33,9 +34,11 @@ std::unique_ptr<mfem::Mesh> DisplacedGeometry(mfem::Mesh& mesh, const RayFEM::Re
         options.displacement->VectorDim() != mesh.SpaceDimension()) {
         throw std::invalid_argument("Profile displacement must be a spatial vector field on the displayed mesh");
     }
+    std::unique_lock construction(RayFEM::FiniteElementConstructionMutex());
     auto displayed = std::make_unique<mfem::Mesh>(mesh);
     // EnsureNodes converts NURBS to polynomial H1 even when nodes exist.
     if (!displayed->GetNodes()) { displayed->EnsureNodes(); }
+    construction.unlock();
     auto& nodes = *displayed->GetNodes();
     const auto* geometry_space = nodes.FESpace();
     if (geometry_space->GetNDofs() != displacement_space->GetNDofs() ||

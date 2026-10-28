@@ -288,8 +288,15 @@ ClippedSurface BuildClippedSurface(mfem::Mesh& mesh,mfem::GridFunction* field,co
     const auto display=displayTransforms(mesh,options,selection);
     if(!std::isfinite(norm(input.normal))||norm(input.normal)<1e-20 || !std::isfinite(input.point.x)||!std::isfinite(input.point.y)||!std::isfinite(input.point.z))throw std::invalid_argument("Clipping plane needs finite coordinates and a nonzero normal");
     if(field)for(int e=0;e<mesh.GetNE();++e)if(selection.Includes(e)){EvaluateField(*field,e,mfem::Geometries.GetCenter(mesh.GetElementBaseGeometry(e)),options.view,options.component);break;}
-    mfem::Vector lower,upper;mesh.GetBoundingBox(lower,upper,2);
-    double extent=0;for(int d=0;d<lower.Size();++d)extent=std::max(extent,std::abs(upper[d]-lower[d]));
+    // Vertex extent sets only the tolerance scale. Mesh::GetBoundingBox would
+    // use MFEM's shared global refiner, which is unsafe off the main thread.
+    double lower[3]={0,0,0},upper[3]={0,0,0};
+    for(int v=0;v<mesh.GetNV();++v)for(int d=0;d<mesh.SpaceDimension();++d){
+        const double x=mesh.GetVertex(v)[d];
+        if(!v||x<lower[d])lower[d]=x;
+        if(!v||x>upper[d])upper[d]=x;
+    }
+    double extent=0;for(int d=0;d<mesh.SpaceDimension();++d)extent=std::max(extent,std::abs(upper[d]-lower[d]));
     const Plane plane{input.point,unit(input.normal),std::max(1e-20,extent*1e-7)};
     ClippedSurface result;
     const int refinement=std::clamp(options.refinement,1,24);

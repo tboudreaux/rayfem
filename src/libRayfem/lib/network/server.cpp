@@ -1,6 +1,7 @@
 #include "libRayfem/network/server.hpp"
 #include "libRayfem/network/zmq.hpp"
 #include "../mesh/input_validation.hpp"
+#include "libRayfem/threading.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -352,6 +353,8 @@ std::vector<std::shared_ptr<RenderFrame>> Server::fetchFrames(size_t max_frames)
 #else
             if (mfem::get_error_action() != mfem::MFEM_ERROR_THROW)
                 throw std::runtime_error("MFEM must use MFEM_ERROR_THROW for safe streaming");
+            // Decoding constructs collections and spaces; see threading.hpp.
+            std::lock_guard construction(FiniteElementConstructionMutex());
             auto mesh = serialized.mesh->decoded.lock();
             if (!mesh) {
                 if (serialized.mesh->decode_failed) throw std::runtime_error("Mesh registration failed decoding");

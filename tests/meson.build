@@ -109,6 +109,10 @@ element_visibility_test = executable('element_visibility_test', 'element_visibil
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 test('element_visibility', element_visibility_test, timeout: 120)
 
+frame_pipeline_test = executable('frame_pipeline_test', 'frame_pipeline_test.cpp',
+    dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
+test('frame_pipeline', frame_pipeline_test, timeout: 120)
+
 element_picker_test = executable('element_picker_test', 'element_picker_test.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 test('element_picker', element_picker_test,

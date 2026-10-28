@@ -27,6 +27,7 @@
 #include "libRayfem/mesh/field_range.hpp"
 #include "libRayfem/io/serif.hpp"
 #include "file_dialog.hpp"
+#include "frame_pipeline.hpp"
 #include "theme.hpp"
 #include "profile_panel.hpp"
 #include "camera_controller.hpp"
@@ -188,6 +189,7 @@ public:
 
     ~VisualizerApp() {
         server.markViewerReady(false);
+        pipeline.Stop();
         ClearCache();
         flow.ClearGraphics();
         streamlineRenderer.Shutdown();
@@ -232,7 +234,13 @@ private:
     }
 
     void LoadArchive(const std::filesystem::path& path) {
-        auto loaded = RayFEM::LoadSerifFile(path);
+        // Reconstruction builds MFEM spaces; run it where the stream is decoded,
+        // then give the frames their worker copies before the UI uses them.
+        auto loaded = pipeline.RunOnWorker([&] {
+            auto result = RayFEM::LoadSerifFile(path);
+            if (result) pipeline.AttachComputeTwins(result.frames);
+            return result;
+        });
         archiveError = loaded.error;
         archiveReportWarnings = std::move(loaded.warnings);
         if (!loaded) {
@@ -317,7 +325,7 @@ private:
 
     void Ingest() {
         const auto previous = Current();
-        for (auto& frame : server.fetchFrames()) {
+        for (auto& frame : pipeline.TakeFrames()) {
             tracking.Observe(frame);
             frames.push_back(std::move(frame));
         }
@@ -445,12 +453,68 @@ private:
         return range;
     }
 
+    // Finished surfaces from the worker become view-cache entries. Errors only
+    // matter for the newest request; older results still fill the cache.
+    void ProcessResults() {
+        while (auto result = pipeline.TakeResult()) {
+            const bool newest = result->request.key == requestedKey;
+            if (newest) requestedKey.clear();
+            if (!result->error.empty()) {
+                if (newest) {error=result->error;failedKey=result->request.key+result->request.appearance;}
+                continue;
+            }
+            if (std::find(frames.begin(),frames.end(),result->request.frame)==frames.end()) continue;
+            try {FinishEntry(*result);}
+            catch(const std::exception& e) {error=e.what();}
+            if (newest) {error.clear();failedKey.clear();}
+        }
+    }
+
+    void FinishEntry(RayFEM::UI::SurfaceResult& result) {
+        auto& request=result.request;
+        auto& data=result.data;
+        ViewCache entry;
+        entry.frame=request.frame; entry.field=request.field; entry.view=request.view; entry.component=request.component;
+        entry.clipping=request.clipping; entry.refinement=request.refinement; entry.displacement=request.displacement;
+        entry.appearance=request.appearance;
+        entry.bounds=data.bounds; entry.min=data.min_value; entry.max=data.max_value;
+        entry.vertices=data.positions.size()/3;
+        entry.boundaries=std::move(result.boundaries); entry.boundaries_ready=result.boundaries_ready;
+        entry.retainedElements=std::move(result.retained);
+        if(!data.positions.empty()) {
+            entry.model=RayFEM::UploadSurface(data);
+            entry.picker=std::move(result.picker);
+        }
+        if(result.has_range) {
+            entry.colorMapping=result.mapping;
+            entry.volumeMin=result.volume_min;entry.volumeMax=result.volume_max;
+            entry.rangeSamples=result.range_samples;
+            entry.rangeBudgetLimited=result.budget_limited;
+            entry.rangeSkippedElements=result.skipped_elements;
+            entry.rangeDistribution=std::move(result.distribution);
+            entry.values=std::move(data.values);
+            entry.hasFieldRange=true;
+        }
+        for (int i=0;i<entry.model.materialCount;++i) entry.model.materials[i].shader=shader;
+        entry.build_ms=result.milliseconds;
+        cache.push_back(std::move(entry));
+        TrimViewCache();
+        const auto& frame=request.frame;
+        if (cache.back().vertices && fittedMesh.lock() != frame->mesh) {
+            if (!cameraAdjusted) FitCamera(cache.back().bounds,!request.clip);
+            fittedMesh=frame->mesh;
+        }
+    }
+
     ViewCache* ActiveView() {
+        surfaceBuilding=false;
+        ProcessResults();
         auto frame = Current();
         elements.Context(frame);
         if (!frame) return nullptr;
-        auto* gf = Field(frame);
-        const int surfaceRefinement = RenderSettings(frame).refinement;
+        Field(frame);
+        const auto settings = RenderSettings(frame);
+        const int surfaceRefinement = settings.refinement;
         float amount = deform && frame->displacement ? displacementScale : 0;
         std::ostringstream clipDescription;
         clipDescription.precision(9);
@@ -473,63 +537,26 @@ private:
             return &cache.back();
         }
         // Invalid field operations are shown once instead of retried every screen refresh.
-        std::string key = std::to_string(reinterpret_cast<uintptr_t>(frame.get()))+fieldName+":"+std::to_string(view)+":"+std::to_string(component)+":"+std::to_string(surfaceRefinement)+":"+std::to_string(amount)+":"+clipKey+appearanceKey;
-        if (failedKey==key) return nullptr;
-        try {
-            auto start=std::chrono::steady_clock::now();
-            ViewCache entry;
-            RayFEM::SurfaceData data;
-            if (clip) {
-                auto cut=RayFEM::BuildClippedSurface(*frame->mesh,gf,RenderSettings(frame),{slicePoint,sliceNormal},static_cast<RayFEM::ClipMode>(clipMode),static_cast<RayFEM::CutAlgorithm>(cutAlgorithm));
-                data=std::move(cut.surface);entry.boundaries=std::move(cut.element_boundaries);entry.boundaries_ready=true;
-                entry.retainedElements=std::move(cut.retained_elements);
-            } else data=RayFEM::BuildSurface(*frame->mesh,gf,RenderSettings(frame));
-            // Keep the legend and its scale even when clipping hides the
-            // entire field. An explicitly empty material selection has none.
-            const auto rangeOptions=RenderSettings(frame);
-            bool hasIncludedElement=false;
-            if(coloring==0 && gf) {
-                const RayFEM::ElementSelection included(*frame->mesh,rangeOptions);
-                for(int e=0;e<frame->mesh->GetNE();++e)
-                    if(included.Includes(e)) {hasIncludedElement=true;break;}
-            }
-            if(hasIncludedElement) {
-                const auto range=VolumeRange(frame,*gf);
-                entry.colorMapping=automaticColorRange ?
-                    RayFEM::ResolveColorScale(range.min_value,range.max_value,colorScale,range.samples) :
-                    RayFEM::ResolveColorScale(colorMinimum,colorMaximum,colorScale);
-                RayFEM::ApplyFieldColorRange(data,entry.colorMapping,static_cast<RayFEM::ColorMap>(colorMap),reverseColors);
-                entry.volumeMin=range.min_value;entry.volumeMax=range.max_value;
-                entry.rangeSamples=range.sample_count;
-                entry.rangeBudgetLimited=range.budget_limited;
-                entry.rangeSkippedElements=range.skipped_elements;
-                entry.rangeDistribution=range.samples;
-                entry.hasFieldRange=true;
-            }
-            entry.frame=frame; entry.field=fieldName; entry.view=view; entry.component=component;
-            entry.clipping=clipKey;
-            entry.refinement=surfaceRefinement; entry.displacement=amount;
-            entry.bounds=data.bounds; entry.min=data.min_value; entry.max=data.max_value;
-            entry.vertices=data.positions.size()/3;
-            if(!data.positions.empty()) {
-                entry.model=RayFEM::UploadSurface(data);
-                entry.picker.Build({entry.model.meshes[0].vertices,data.positions.size()},data.element_ids);
-            }
-            if(entry.hasFieldRange)entry.values=std::move(data.values);
-            entry.appearance=appearanceKey;
-            for (int i=0;i<entry.model.materialCount;++i) entry.model.materials[i].shader=shader;
-            entry.build_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-            cache.push_back(std::move(entry));
-            TrimViewCache();
-            if (cache.back().vertices && fittedMesh.lock() != frame->mesh) {
-                if (!cameraAdjusted) FitCamera(cache.back().bounds,!clip);
-                fittedMesh=frame->mesh;
-            }
-            error.clear(); failedKey.clear();
-            return &cache.back();
-        } catch (const std::exception& e) { error=e.what(); failedKey=key; return nullptr; }
+        const std::string key = std::to_string(reinterpret_cast<uintptr_t>(frame.get()))+fieldName+":"+std::to_string(view)+":"+std::to_string(component)+":"+std::to_string(surfaceRefinement)+":"+std::to_string(amount)+":"+clipKey;
+        if (failedKey==key+appearanceKey) return nullptr;
+        if (requestedKey!=key) {
+            RayFEM::UI::SurfaceRequest request;
+            request.frame=frame; request.key=key; request.appearance=appearanceKey;
+            request.field=fieldName; request.clipping=clipKey;
+            request.view=view; request.component=component; request.refinement=surfaceRefinement; request.displacement=amount;
+            request.options=settings; request.options.displacement=nullptr; request.deform=deform;
+            request.clip=clip; request.plane={slicePoint,sliceNormal};
+            request.clip_mode=static_cast<RayFEM::ClipMode>(clipMode);
+            request.cut_algorithm=static_cast<RayFEM::CutAlgorithm>(cutAlgorithm);
+            request.automatic_range=automaticColorRange; request.minimum=colorMinimum; request.maximum=colorMaximum;
+            request.boundaries=showBoundaries;
+            pipeline.Request(std::move(request));
+            requestedKey=key;
+        }
+        // Keep showing the last finished surface while this one is built.
+        surfaceBuilding=true;
+        return cache.empty() ? nullptr : &cache.back();
     }
-
     void FitCamera(BoundingBox box,bool initializePlane=false) {
         cameraTransition.active=false;
         cameraDrag={};
@@ -1332,6 +1359,8 @@ private:
 
         struct Chip { std::string label; const char* tip; };
         std::vector<Chip> chips;
+        if(active && surfaceBuilding)
+            chips.push_back({ICON_FA_ARROWS_ROTATE "  Updating","The last finished surface is shown while the current frame and settings are built."});
         if(const auto frame=Current()) {
             if(clip) chips.push_back({ICON_FA_SCISSORS "  Clipped","Clipping is on. Change it under View > Clipping."});
             if(coloring==0 && !automaticColorRange)
@@ -1383,7 +1412,7 @@ private:
         if(pickingDof)
             banner(ICON_FA_CROSSHAIRS,"Click a DOF marker to track its coefficient.  Press Esc or Cancel pick to stop.",palette.accent);
         if(!error.empty()) banner(ICON_FA_TRIANGLE_EXCLAMATION,error.c_str(),palette.warning);
-        if(Current() && !active)
+        if(Current() && !active && !surfaceBuilding)
             banner(error.empty()?ICON_FA_TRIANGLE_EXCLAMATION:nullptr,"Choose a supported field operation in the View tab.",palette.warning);
 
         // Centered guidance for an empty viewport.
@@ -1410,7 +1439,9 @@ private:
                           {"or s"+stream.substr(1)+".",palette.muted}});
             else
                 centered({{ICON_FA_TOWER_BROADCAST "  Waiting for frames",palette.text},{stream+".",palette.muted}});
-        } else if(active && !active->vertices)
+        } else if(!active && surfaceBuilding)
+            centered({{ICON_FA_ARROWS_ROTATE "  Building surface",palette.text},{"Evaluating the field on the mesh.",palette.muted}});
+        else if(active && !active->vertices && !surfaceBuilding)
             centered({{ICON_FA_EYE_SLASH "  No visible elements",palette.text},
                       {"Check hidden materials, hidden elements, or the clipping plane.",palette.muted}});
     }
@@ -1504,6 +1535,7 @@ private:
 
     Options opts;
     RayFEM::Server server;
+    RayFEM::UI::FramePipeline pipeline{server};
     ArchiveFileDialog fileDialog;
     std::string archivePath, archiveError;
     std::vector<std::string> archiveWarnings;
@@ -1534,7 +1566,8 @@ private:
     double colorMinimum=0,colorMaximum=1;
     int selected=-1,view=0,component=0,refinement=3,clipMode=0,cutAlgorithm=0;
     bool automaticDetail=true;
-    std::string fieldName,error,failedKey;
+    std::string fieldName,error,failedKey,requestedKey;
+    bool surfaceBuilding=false;
     bool follow=true,playing=false,wireframe=false,showSurface=true,showBoundaries=true,showDofs=false,deform=true,clip=false,planeGuide=false;
     bool cameraAdjusted=false;
     bool keepReferencePlane=false;

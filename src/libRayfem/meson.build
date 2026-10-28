@@ -2,6 +2,7 @@ include_dirs = include_directories('include')
 sources = files(
     'lib/mfem_compat.cpp',
     'lib/init.cpp',
+    'lib/threading.cpp',
     'lib/network/client.cpp',
     'lib/network/server.cpp',
     'lib/mesh/converter.cpp',

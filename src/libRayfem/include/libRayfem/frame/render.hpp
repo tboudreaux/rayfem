@@ -54,6 +54,10 @@ struct RenderFrame {
     // for MFEM bookkeeping. These are not exact allocator or GPU measurements.
     size_t estimated_bytes = 0;       // This frame's fields and finite-element spaces.
     size_t estimated_mesh_bytes = 0;  // Shared geometry, counted once per mesh.
+    // Optional twin of this frame on separately owned MFEM objects, so a
+    // background thread can evaluate it while this frame is used elsewhere.
+    // MFEM meshes and spaces are not safe to share between threads.
+    std::shared_ptr<RenderFrame> compute;
 };
 
 template<class Frames>
