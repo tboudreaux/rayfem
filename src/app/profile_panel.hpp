@@ -7,6 +7,7 @@
 #include "plot.hpp"
 #include "frame_pipeline.hpp"
 #include "ray_placement.hpp"
+#include "widgets.hpp"
 #include "theme.hpp"
 #include "extras/IconsFontAwesome6.h"
 #include <algorithm>
@@ -82,11 +83,16 @@ public:
                   mfem::GridFunction* field,const std::string& fieldName,
                   const RayFEM::RenderOptions& options) {
         UpdateContext(frame,field,fieldName,options);
+        constexpr const char* badges[]={nullptr,"Ray","Plane"};
+        if(!RayFEM::UI::BeginSection("Profile",badges[std::clamp(mode,0,2)]))return;
+        ControlsBody();
+        RayFEM::UI::EndSection();
+    }
+private:
+    void ControlsBody() {
         ImGui::PushID("Profile controls");
         int selectedMode=mode;
-        const char* modes[]={"Profiles off","Ray profile","Plane profile"};
-        ImGui::SetNextItemWidth(-1);
-        if(ImGui::Combo("##mode",&selectedMode,modes,3))SetMode(selectedMode);
+        if(RayFEM::UI::Segmented("##mode",&selectedMode,{"Off","Ray","Plane"}))SetMode(selectedMode);
         Tip("Sample the field along a ray or across a plane. Move the handles in the viewport to position the profile.");
         if(!Enabled()) {
             ImGui::PopID();return;
@@ -116,7 +122,7 @@ public:
             if(ImGui::Button(ICON_FA_VIDEO "###view_ray",{width,0}))ViewRay();
             Tip("Ray through the mesh center along your view direction");
         } else ImGui::TextDisabled("Drag the handles in the viewport.");
-        ImGui::Checkbox("Live update",&liveUpdate);
+        RayFEM::UI::Switch("Live update",&liveUpdate);
         Tip("Resample automatically while you move the profile and when the frame changes. Turn off to sample on demand.");
         if(!liveUpdate) {
             ImGui::BeginDisabled(!context || !fieldPointer);
@@ -128,8 +134,7 @@ public:
             else ImGui::TextColored(RayFEM::UI::ThemeText(RayFEM::UI::Palette().success),"Current sample");
             ImGui::TextDisabled("%zu / %zu inside  ·  %.1f ms",valid,samples.size(),sampleMs);
         }
-        ImGui::Spacing();
-        if(ImGui::CollapsingHeader("Sampling settings")) {
+        if(ImGui::TreeNode("Sampling settings")) {
             ImGui::PushItemWidth(-1);
             if(mode==1) {
                 ImGui::TextDisabled("Origin");dirty|=ImGui::DragFloat3("##origin",&origin.x,scale*.005f,0,0,"%.4g");
@@ -154,18 +159,21 @@ public:
             }
             Tip("Both methods evaluate the finite-element field at the requested positions. Coherent mapping reuses nearby element searches.");
             ImGui::PopItemWidth();
+            ImGui::TreePop();
         }
-        if(!samples.empty() && ImGui::CollapsingHeader("Export")) {
+        if(!samples.empty() && ImGui::TreeNode("Export")) {
             ImGui::TextDisabled("CSV destination");ImGui::SetNextItemWidth(-1);
             ImGui::InputText("##csv_path",path,sizeof(path));
             ImGui::BeginDisabled(dirty);
             if(ImGui::Button("Save CSV",{-1,0}))Export();
             ImGui::EndDisabled();
             if(dirty)ImGui::TextWrapped("Update the profile before exporting.");
+            ImGui::TreePop();
         }
         if(!message.empty())ImGui::TextWrapped("%s",message.c_str());
         ImGui::PopID();
     }
+public:
 
     // Viewport input. Returning true reserves the drag so it cannot also orbit
     // the camera. Rays are drawn on the mesh (pick finds the surface under the

@@ -3,6 +3,8 @@
 #include "libRayfem/frame/render.hpp"
 #include "libRayfem/mesh/element_statistics.hpp"
 #include "theme.hpp"
+#include "widgets.hpp"
+#include "libRayfem/mesh/converter.hpp"
 #include "mouse_modifiers.hpp"
 #include "imgui.h"
 #include <algorithm>
@@ -65,21 +67,6 @@ public:
         if(!frame || !frame->mesh) {
             ImGui::TextDisabled("No mesh loaded");ImGui::PopID();return;
         }
-        const float right=ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x;
-        ImGui::AlignTextToFramePadding();ImGui::Text("%zu selected",selected.size());
-        const float clearWidth=ImGui::CalcTextSize("Clear").x+2*ImGui::GetStyle().FramePadding.x;
-        ImGui::SameLine(std::max(ImGui::GetCursorPosX(),right-clearWidth));
-        ImGui::BeginDisabled(selected.empty());
-        if(ImGui::Button("Clear"))Select(std::nullopt,false);
-        ImGui::EndDisabled();
-        const float half=(ImGui::GetContentRegionAvail().x-ImGui::GetStyle().ItemSpacing.x)*.5f;
-        ImGui::BeginDisabled(selected.empty());
-        if(ImGui::Button("Hide selected",{half,0}))SetSelectedVisible(false);
-        ImGui::SameLine();
-        if(ImGui::Button("Show selected",{half,0}))SetSelectedVisible(true);
-        ImGui::EndDisabled();
-        Tip("Hidden elements stay selected. Visibility also controls physical analysis.");
-
         // This panel owns the viewer's element mask; use its current state,
         // including button changes made after the parent built its settings.
         auto effective=options;
@@ -89,7 +76,18 @@ public:
             effective.displacement!=nullptr,effective.displacement_scale,
             effective.excluded_materials,effective.excluded_elements};
         if(!lastSettings || *lastSettings!=current) {lastSettings=std::move(current);statisticsPending=true;}
-        if(ImGui::CollapsingHeader("Selection statistics",ImGuiTreeNodeFlags_DefaultOpen)) {
+        const std::string selectedBadge=selected.empty()?"":std::to_string(selected.size())+" selected";
+        if(RayFEM::UI::BeginSection("Selection",selectedBadge.c_str())) {
+            // One row of actions; the header already counts the selection.
+            const float third=(ImGui::GetContentRegionAvail().x-2*ImGui::GetStyle().ItemSpacing.x)/3;
+            ImGui::BeginDisabled(selected.empty());
+            if(ImGui::Button(ICON_FA_EYE_SLASH " Hide",{third,0}))SetSelectedVisible(false);
+            Tip("Hide the selected elements. Hidden elements stay selected, and visibility also controls physical analysis.");
+            ImGui::SameLine();
+            if(ImGui::Button(ICON_FA_EYE " Show",{third,0}))SetSelectedVisible(true);
+            ImGui::SameLine();
+            if(ImGui::Button(ICON_FA_XMARK " Clear",{third,0}))Select(std::nullopt,false);
+            ImGui::EndDisabled();
             if(selected.empty())ImGui::TextDisabled("Click an element to inspect it.");
             else {
                 if(statisticsPending)Compute(frame,field,fieldName,effective);
@@ -104,8 +102,10 @@ public:
                     if(ImGui::Button("Retry statistics",{-1,0}))Compute(frame,field,fieldName,effective);
                 } else if(statistics)DrawStatistics();
             }
+            RayFEM::UI::EndSection();
         }
-        ImGui::Spacing();
+        const std::string hiddenBadge=hidden.empty()?"":std::to_string(hidden.size())+" hidden";
+        if(!RayFEM::UI::BeginSection("All elements",hiddenBadge.c_str())) {ImGui::PopID();return;}
         ImGui::SetNextItemWidth(std::max(100.0f,ImGui::GetContentRegionAvail().x-86));
         ImGui::Combo("##element_filter",&filter,"All elements\0Selected\0Hidden\0");
         ImGui::SameLine();ImGui::BeginDisabled(hidden.empty());
@@ -114,6 +114,7 @@ public:
         ImGui::TextDisabled("%d elements  ·  %zu hidden",elementCount,hidden.size());
         Tip("Click a row to select it. Shift-click adds or removes it. Element IDs are zero-based.");
         DrawList(*frame->mesh,effective.excluded_materials);
+        RayFEM::UI::EndSection();
         ImGui::PopID();
     }
 
@@ -175,11 +176,14 @@ private:
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%zu quadrature samples · %.1f ms",result.quadrature_samples,sampleMs);
         if(result.excluded_count)ImGui::TextDisabled("%zu selected excluded from analysis",result.excluded_count);
         if(!result.element_count)return;
-        if(ImGui::BeginTable("##statistics",2,ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Property",ImGuiTableColumnFlags_WidthFixed,86);
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,{6,5});
+        const bool statisticsTable=ImGui::BeginTable("##statistics",2,ImGuiTableFlags_SizingStretchProp);
+        ImGui::PopStyleVar();
+        if(statisticsTable) {
+            ImGui::TableSetupColumn("Property",ImGuiTableColumnFlags_WidthFixed,ImGui::CalcTextSize("Material IDs").x+16);
             ImGui::TableSetupColumn("Value",ImGuiTableColumnFlags_WidthStretch);
             NumberRow(result.dimension==3?"Volume":"Area",result.measure);
-            const auto& c=result.centroid;char center[128];std::snprintf(center,sizeof(center),"%.5g, %.5g, %.5g",c[0],c[1],c[2]);
+            const auto& c=result.centroid;char center[128];std::snprintf(center,sizeof(center),"%.4g,  %.4g,  %.4g",c[0],c[1],c[2]);
             TextRow("Centroid",center);
             TextRow("Material IDs",Counts(result.material_counts,[](int id){return std::to_string(id);}));
             TextRow("Geometry",Counts(result.geometry_counts,[](int id){return std::string(mfem::Geometry::Name[id]);}));
@@ -209,12 +213,19 @@ private:
         const int rows=filtered?static_cast<int>(filtered->size()):elementCount;
         std::optional<std::pair<int,bool>> visibility;
         std::optional<std::pair<int,bool>> selection;
-        const float height=std::max(140.0f,ImGui::GetContentRegionAvail().y);
-        if(ImGui::BeginTable("##element_list",3,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH|
-                            ImGuiTableFlags_ScrollY|ImGuiTableFlags_SizingStretchProp,{0,height})) {
-            ImGui::TableSetupColumn("Show",ImGuiTableColumnFlags_WidthFixed,42);
+        // A list of about a dozen rows that scrolls on its own.
+        const float rowHeight=ImGui::GetFrameHeight()+8;
+        const float height=std::clamp(rowHeight*(rows+1)+4,rowHeight*3,rowHeight*12);
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,{8,4});
+        const bool open=ImGui::BeginTable("##element_list",3,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH|ImGuiTableFlags_PadOuterX|
+                            ImGuiTableFlags_ScrollY|ImGuiTableFlags_SizingStretchProp,{0,height});
+        ImGui::PopStyleVar();
+        // Row labels center vertically with the eye toggle and material.
+        ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign,{0,.5f});
+        if(open) {
+            ImGui::TableSetupColumn("Show",ImGuiTableColumnFlags_WidthFixed,ImGui::CalcTextSize("Show").x+8);
             ImGui::TableSetupColumn("Element",ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("Material",ImGuiTableColumnFlags_WidthFixed,68);
+            ImGui::TableSetupColumn("Material",ImGuiTableColumnFlags_WidthFixed,ImGui::CalcTextSize("Material").x+8);
             ImGui::TableSetupScrollFreeze(0,1);ImGui::TableHeadersRow();
             ImGuiListClipper clipper;clipper.Begin(rows);
             while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row) {
@@ -229,16 +240,29 @@ private:
                     ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowOverlap,{0,ImGui::GetFrameHeight()});
                 if(materialHidden)ImGui::PopStyleColor();
                 ImGui::TableSetColumnIndex(0);
-                if(ImGui::Checkbox("##visible",&visible))visibility=std::pair{id,visible};
+                // An eye toggle: bright when shown, muted when hidden.
+                const float size=ImGui::GetFrameHeight();
+                const ImVec2 at=ImGui::GetCursorScreenPos();
+                if(ImGui::InvisibleButton("##visible",{size,size})){visible=!visible;visibility=std::pair{id,visible};}
                 const bool checkboxHovered=ImGui::IsItemHovered();
+                const char* eye=visible?ICON_FA_EYE:ICON_FA_EYE_SLASH;
+                const ImVec2 eyeSize=ImGui::CalcTextSize(eye);
+                ImGui::GetWindowDrawList()->AddText({at.x+(size-eyeSize.x)*.5f,at.y+(size-eyeSize.y)*.5f},
+                    visible?(checkboxHovered?RayFEM::UI::Palette().accent:RayFEM::UI::Palette().text):RayFEM::UI::Palette().muted,eye);
+                if(checkboxHovered && !materialHidden)ImGui::SetTooltip(visible?"Hide this element":"Show this element");
                 if(materialHidden)Tip("This element's material is excluded. Enable its material in View to render or analyze it.");
                 if(clicked && !checkboxHovered)selection=std::pair{id,
                     ImGui::IsMouseReleased(ImGuiMouseButton_Left)?RayFEM::UI::MouseSelectionShift():ImGui::GetIO().KeyShift};
-                ImGui::TableSetColumnIndex(2);ImGui::AlignTextToFramePadding();ImGui::Text("%d",material);
+                ImGui::TableSetColumnIndex(2);ImGui::AlignTextToFramePadding();
+                const auto swatch=RayFEM::AttributeColor(material);
+                const ImVec2 dot=ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddCircleFilled({dot.x+5,dot.y+ImGui::GetFrameHeight()*.5f},4.5f,IM_COL32(swatch.r,swatch.g,swatch.b,255));
+                ImGui::SetCursorScreenPos({dot.x+16,dot.y});ImGui::Text("%d",material);
                 ImGui::PopID();
             }
             ImGui::EndTable();
         }
+        ImGui::PopStyleVar();
         // Defer mutations until clipping has finished so Selected/Hidden row
         // indices cannot become invalid halfway through a filtered table.
         if(visibility)SetVisible(visibility->first,visibility->second);

@@ -41,6 +41,7 @@
 #include "edge_renderer.hpp"
 #include "dof_renderer.hpp"
 #include "ray_placement.hpp"
+#include "widgets.hpp"
 #include "element_picker.hpp"
 #include "element_panel.hpp"
 #include "mouse_modifiers.hpp"
@@ -180,6 +181,14 @@ public:
         }
         ImGui::GetIO().FontDefault=uiFont?uiFont:ImGui::GetIO().Fonts->AddFontDefault(&font);
         rlImGuiMergeFontAwesome(14);
+        // Section titles use the bold face of the same family when it exists.
+        for(const char* path:{"/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                              "C:/Windows/Fonts/segoeuib.ttf"}) {
+            if(std::filesystem::is_regular_file(path)) {
+                if((RayFEM::UI::HeadingFont()=ImGui::GetIO().Fonts->AddFontFromFileTTF(path,16,&font))) break;
+            }
+        }
         RayFEM::UI::ApplyLayout();
         RayFEM::UI::ApplyTheme(opts.light ? RayFEM::UI::ThemeMode::Light : RayFEM::UI::ThemeMode::Dark);
         rotationIcons=RayFEM::UI::LoadRotationIcons();
@@ -745,29 +754,33 @@ private:
         tracking.ProcessPending();
         // Drag the inspector's right edge to widen it; the size lasts for the session.
         ImGui::SetNextWindowSizeConstraints({260,0},{std::max(260.0f,GetScreenWidth()*.45f),FLT_MAX});
-        ImGui::BeginChild("Inspector",{300,0},ImGuiChildFlags_Borders|ImGuiChildFlags_ResizeX);
+        ImGui::BeginChild("Inspector",{340,0},ImGuiChildFlags_Borders|ImGuiChildFlags_ResizeX);
         ImGui::PushItemWidth(164);
-        if (ImGui::BeginTabBar("Inspector tabs")) {
-            if (ImGui::BeginTabItem("View",nullptr,inspectorTab==0?ImGuiTabItemFlags_SetSelected:0)) {
-                if(inspectorTab==0) inspectorTab=-1;
-                DrawControls();ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Analyze",nullptr,inspectorTab==1?ImGuiTabItemFlags_SetSelected:0)) {
-                if(inspectorTab==1) inspectorTab=-1;
-                profiles.Controls(frame,gf,fieldName,RenderSettings(frame));
-                ImGui::Spacing();
-                surfaceTrace.Controls(frame,gf,fieldName,RenderSettings(frame));
-                ImGui::Spacing();
-                tracking.Controls(frame,fieldName,RenderSettings(frame),frames);
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Elements",nullptr,inspectorTab==2?ImGuiTabItemFlags_SetSelected:0)) {
-                if(inspectorTab==2) inspectorTab=-1;
-                elements.Controls(frame,gf,fieldName,RenderSettings(frame));
-                ImGui::EndTabItem();
-            }
-            ImGui::EndTabBar();
+        // Page switcher, fixed above the scrolling page.
+        if(inspectorTab>=0) {inspectorPage=inspectorTab;inspectorTab=-1;}
+        RayFEM::UI::Segmented("##inspector_pages",&inspectorPage,
+            {ICON_FA_EYE " View",ICON_FA_MAGNIFYING_GLASS_CHART " Analyze",ICON_FA_CUBES " Elements"});
+        if(frame) {
+            char summary[160];
+            std::snprintf(summary,sizeof(summary),"%d elements  ·  %dD  ·  %zu fields  ·  frame %u",
+                          frame->mesh->GetNE(),frame->mesh->Dimension(),frame->fields.size(),frame->metadata.frame_index);
+            ImGui::TextDisabled("%s",summary);
         }
+        ImGui::Spacing();
+        // A small gutter keeps cards off the scrollbar and the inspector edge.
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{6,0});
+        ImGui::BeginChild("Inspector page",{0,0},ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PopStyleVar();
+        switch(inspectorPage) {
+        case 0: DrawControls(); break;
+        case 1:
+            profiles.Controls(frame,gf,fieldName,RenderSettings(frame));
+            surfaceTrace.Controls(frame,gf,fieldName,RenderSettings(frame));
+            tracking.Controls(frame,fieldName,RenderSettings(frame),frames);
+            break;
+        default: elements.Controls(frame,gf,fieldName,RenderSettings(frame)); break;
+        }
+        ImGui::EndChild();
         if(tracking.TakePlotRequest()) {plotTab=1;showPlots=true;}
         ImGui::PopItemWidth();
         ImGui::EndChild();
@@ -898,7 +911,7 @@ private:
     }
 
     void ReferencePlaneControl() {
-        ImGui::Checkbox("Keep reference plane",&keepReferencePlane);
+        RayFEM::UI::Switch("Keep reference plane",&keepReferencePlane);
         Tip("Keep the reference grid visible when a mesh is loaded.");
         if(ImGui::TreeNode("Plane orientation")) {
             if(ImGui::Button("XY"))referenceRotation={0,0,0};
@@ -921,10 +934,12 @@ private:
     void DrawControls() {
         auto frame=Current();auto* gf=Field(frame);
         if(!frame) {
-            ImGui::Spacing();ImGui::TextDisabled("Waiting for frames");
-            ImGui::Spacing();ReferencePlaneControl();return;
+            ImGui::TextDisabled("Waiting for frames");
+            if(RayFEM::UI::BeginSection("Reference plane")){ReferencePlaneControl();RayFEM::UI::EndSection();}
+            return;
         }
-        ImGui::Spacing();RayFEM::UI::FieldLabel("Field");
+        if(RayFEM::UI::BeginSection("Field")) {
+        RayFEM::UI::FieldLabel("Field");
         if(ImGui::BeginCombo("##field",fieldName.c_str())) {
             for(const auto& f:frame->fields) if(ImGui::Selectable(f.name.c_str(),f.name==fieldName)) {
                 fieldName=f.name;view=0;component=0;automaticColorRange=true;
@@ -943,33 +958,28 @@ private:
             RayFEM::UI::FieldLabel("Space");ImGui::TextDisabled("%s",gf->FESpace()->FEColl()->Name());
             Tip("Finite element space of the selected field.");
         }
+        RayFEM::UI::EndSection();
+        }
         bool colorScaleOpen=false;
         if(coloring==0 && gf) {
-            colorScaleOpen=ImGui::CollapsingHeader("Color scale");
             std::string badge=colorScale.scale==RayFEM::ColorScale::Linear?"":RayFEM::ColorScaleName(colorScale.scale);
             if(!automaticColorRange) badge+=badge.empty()?"Fixed":" · Fixed";
-            RayFEM::UI::HeaderBadge(badge.c_str());
+            colorScaleOpen=RayFEM::UI::BeginSection("Color",badge.c_str());
         }
         if(colorScaleOpen) {
-            RayFEM::UI::FieldLabel("Color map");
-            if(ImGui::BeginCombo("##color_map",RayFEM::ColorMapName(static_cast<RayFEM::ColorMap>(colorMap)))) {
-                for(int i=0;i<RayFEM::ColorMapCount;++i)
-                    if(ImGui::Selectable(RayFEM::ColorMapName(static_cast<RayFEM::ColorMap>(i)),i==colorMap))colorMap=i;
-                ImGui::EndCombo();
-            }
+            ImGui::SetNextItemWidth(-1);
+            RayFEM::UI::ColorMapPicker("##color_map",&colorMap,reverseColors);
             Tip("Viridis, Plasma, Inferno and Cividis are sequential palettes. Coolwarm is diverging; "
                 "use symmetric limits to center it at zero. Jet preserves the older rainbow colors.");
-            ImGui::Checkbox("Reverse colors",&reverseColors);
-            RayFEM::UI::FieldLabel("Scale");
+            RayFEM::UI::Switch("Reverse colors",&reverseColors);
             int scaleMode=static_cast<int>(colorScale.scale);
-            const char* scales[]={"Linear","Signed log","ZScale"};
-            if(ImGui::Combo("##color_scale",&scaleMode,scales,3)) {
+            if(RayFEM::UI::Segmented("##color_scale",&scaleMode,{"Linear","Signed log","ZScale"})) {
                 colorScale.scale=static_cast<RayFEM::ColorScale>(scaleMode);
                 if(colorScale.scale==RayFEM::ColorScale::ZScale)automaticColorRange=true;
             }
             if(colorScale.scale==RayFEM::ColorScale::SignedLog) {
                 bool automaticThreshold=colorScale.log_threshold==0;
-                if(ImGui::Checkbox("Automatic log threshold",&automaticThreshold)) {
+                if(RayFEM::UI::Switch("Automatic log threshold",&automaticThreshold)) {
                     colorScale.log_threshold=0;
                     if(!automaticThreshold) {
                         try {
@@ -993,7 +1003,7 @@ private:
                     colorScale.zscale_contrast=contrast;
                 Tip("IRAF / DS9 robust limits from volume samples. Higher contrast narrows the range; zero uses the full range.");
             }
-            if(ImGui::Checkbox("Automatic volume range",&automaticColorRange) && !automaticColorRange) {
+            if(RayFEM::UI::Switch("Automatic volume range",&automaticColorRange) && !automaticColorRange) {
                 try {
                     const auto range=VolumeRange(frame,*gf);
                     const auto mapping=RayFEM::ResolveColorScale(range.min_value,range.max_value,colorScale,range.samples);
@@ -1015,14 +1025,12 @@ private:
                     ImGui::PopStyleColor();
                 }
             }
+            RayFEM::UI::EndSection();
         }
-        ImGui::Spacing();
-        const bool regionsOpen=ImGui::CollapsingHeader("Regions",ImGuiTreeNodeFlags_DefaultOpen);
         const std::string hiddenMaterials=excludedMaterials.empty()?"":std::to_string(excludedMaterials.size())+" hidden";
-        RayFEM::UI::HeaderBadge(hiddenMaterials.c_str());
-        if(regionsOpen) {
-            const char* colors[]={"Field values","Material IDs","Boundary IDs"};
-            ImGui::SetNextItemWidth(-1);ImGui::Combo("##coloring",&coloring,colors,3);
+        if(RayFEM::UI::BeginSection("Regions",hiddenMaterials.c_str())) {
+            ImGui::TextDisabled("Color by");
+            RayFEM::UI::Segmented("##coloring",&coloring,{"Field","Material","Boundary"});
             if(ImGui::TreeNode("Materials")) {
                 if(ImGui::Button("All")) excludedMaterials.clear();
                 ImGui::SameLine();
@@ -1038,7 +1046,7 @@ private:
                     ImGui::PushID(id);const auto c=RayFEM::AttributeColor(id);
                     ImGui::BeginDisabled(unsupported);
                     if (unsupported) included = false;
-                    if(ImGui::Checkbox(("Material "+std::to_string(id)).c_str(),&included)) {
+                    if(RayFEM::UI::Switch(("Material "+std::to_string(id)).c_str(),&included)) {
                         if(included) std::erase(excludedMaterials,id);else excludedMaterials.push_back(id);
                     }
                     ImGui::EndDisabled();
@@ -1054,18 +1062,19 @@ private:
                 ImGui::TextDisabled("Applies to rendering and analysis");
                 ImGui::TreePop();
             }
+            RayFEM::UI::EndSection();
         }
-        if(ImGui::CollapsingHeader("Appearance",ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Checkbox("Surface",&showSurface);
-            ImGui::Checkbox("Element edges",&showBoundaries);
-            ImGui::Checkbox("DOF points",&showDofs);
+        if(RayFEM::UI::BeginSection("Display")) {
+            RayFEM::UI::Switch("Surface",&showSurface);
+            RayFEM::UI::Switch("Element edges",&showBoundaries);
+            RayFEM::UI::Switch("DOF points",&showDofs);
             Tip("Hover for coefficient details. Use Pick DOF to add a time trace.");
             RayFEM::UI::FieldLabel("Explode elements");
             ImGui::SliderFloat("##element_explosion",&elementExplosion,0,.95f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
             Tip("Open gaps by shrinking each displayed element around its center. Zero restores the mesh. Field values and analysis use the original domain.");
             ReferencePlaneControl();
             if(ImGui::TreeNode("Detail")) {
-                ImGui::Checkbox("Automatic detail",&automaticDetail);
+                RayFEM::UI::Switch("Automatic detail",&automaticDetail);
                 Tip("Choose surface detail from the mesh and displacement orders.");
                 if (automaticDetail)
                     ImGui::TextDisabled("%d subdivisions per edge", RenderSettings(frame).refinement);
@@ -1073,34 +1082,29 @@ private:
                     RayFEM::UI::FieldLabel("Subdivisions");
                     ImGui::SliderInt("##refinement",&refinement,1,32);
                 }
-                ImGui::Checkbox("Tessellation",&wireframe);
+                RayFEM::UI::Switch("Tessellation",&wireframe);
                 ImGui::TreePop();
             }
+            RayFEM::UI::EndSection();
         }
-        flow.Controls();
-        bool deformationOpen=false;
         if(frame->displacement) {
-            deformationOpen=ImGui::CollapsingHeader("Deformation",ImGuiTreeNodeFlags_DefaultOpen);
             char badge[32]="Off";
             if(deform && displacementScale!=1) std::snprintf(badge,sizeof(badge),"×%.2f",displacementScale);
-            RayFEM::UI::HeaderBadge(deform && displacementScale==1?nullptr:badge);
-        }
-        if(deformationOpen) {
-            ImGui::Checkbox("Apply displacement",&deform);
-            RayFEM::UI::FieldLabel("Scale");
-            ImGui::SliderFloat("##displacement_scale",&displacementScale,-2,3,"%.2f");
-        }
-        const bool clippingOpen=ImGui::CollapsingHeader("Clipping");
-        RayFEM::UI::HeaderBadge(clip?"On":nullptr);
-        if(clippingOpen) {
-            ImGui::Checkbox("Enable##clipping",&clip);
-            const char* modes[]={"Cut elements","Whole elements"};
-            ImGui::SetNextItemWidth(-1);ImGui::Combo("##clipmode",&clipMode,modes,2);
-            if(clipMode==0) {
-                const char* algorithms[]={"Curved / refined","Planar / fast"};
-                ImGui::SetNextItemWidth(-1);ImGui::Combo("##cutalgorithm",&cutAlgorithm,algorithms,2);
+            if(RayFEM::UI::BeginSection("Deformation",deform && displacementScale==1?nullptr:badge)) {
+                RayFEM::UI::Switch("Apply displacement",&deform);
+                RayFEM::UI::FieldLabel("Scale");
+                ImGui::SliderFloat("##displacement_scale",&displacementScale,-2,3,"%.2f");
+                RayFEM::UI::EndSection();
             }
-            ImGui::Checkbox("Plane guide",&planeGuide);
+        }
+        if(RayFEM::UI::BeginSection("Clipping",clip?"On":nullptr,false)) {
+            RayFEM::UI::Switch("Enable##clipping",&clip);
+            RayFEM::UI::Segmented("##clipmode",&clipMode,{"Cut elements","Whole elements"});
+            if(clipMode==0)
+                RayFEM::UI::Segmented("##cutalgorithm",&cutAlgorithm,{"Curved","Planar"});
+            if(clipMode==0 && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                ImGui::SetTooltip("Curved follows high-order geometry through each cut cell; Planar is faster.");
+            RayFEM::UI::Switch("Plane guide",&planeGuide);
             ImGui::TextDisabled("Position");ImGui::SetNextItemWidth(-1);
             ImGui::DragFloat3("##clip_position",&slicePoint.x,radius*0.01f);
             ImGui::TextDisabled("Normal");ImGui::SetNextItemWidth(-1);
@@ -1124,7 +1128,9 @@ private:
                 if(ImGui::Button(ICON_FA_CROSSHAIRS "  Through view center",{-1,0}))slicePoint=camera.target;
                 Tip("Move the plane through the point the camera orbits around.");
             }
+            RayFEM::UI::EndSection();
         }
+        flow.Controls();
     }
 
     static constexpr const char* previousFrameLabel=ICON_FA_BACKWARD_STEP "###previous";
@@ -1140,41 +1146,87 @@ private:
         return label;
     }
 
+    static constexpr float timelinePadding=10;
+
+    // Height of the timeline card, including the gap above it.
     float TimelineHeight(float width) const {
         const auto& style=ImGui::GetStyle();
         const float row=ImGui::GetFrameHeight();
-        auto button=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+2*style.FramePadding.x;};
-        const float controls=button(previousFrameLabel)+button(nextFrameLabel)+playButtonWidth+100+
-            button(liveLabel)+4*style.ItemSpacing.x;
-        const bool wrap=Current() && controls+style.ItemSpacing.x+ImGui::CalcTextSize(TimelineLabel().c_str()).x>width;
-        return row*(Current()?2:1)+style.ItemSpacing.y*3+(wrap?row+style.ItemSpacing.y:0);
+        const bool wrap=Current() && TimelineControlsWidth()+style.ItemSpacing.x*2+
+            ImGui::CalcTextSize(TimelineLabel().c_str()).x>width-2*timelinePadding;
+        return style.ItemSpacing.y+2*timelinePadding+row*(Current()?2:1)+(Current()?style.ItemSpacing.y:0)+(wrap?row+style.ItemSpacing.y:0);
     }
 
+    float TimelineControlsWidth() const {
+        const auto& style=ImGui::GetStyle();
+        auto button=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+2*style.FramePadding.x;};
+        return button(previousFrameLabel)+button(nextFrameLabel)+playButtonWidth+12+100+button(liveLabel)+3*style.ItemSpacing.x;
+    }
+
+    // The timeline as a card: a transport group, speed and Live, the current
+    // frame, then a scrubber across all retained frames.
     void DrawTimeline() {
-        ImGui::Spacing();
+        const auto& style=ImGui::GetStyle();
+        const auto& palette=RayFEM::UI::Palette();
+        const bool light=RayFEM::UI::CurrentTheme()==RayFEM::UI::ThemeMode::Light;
+        const float height=TimelineHeight(ImGui::GetContentRegionAvail().x)-style.ItemSpacing.y;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg,light?IM_COL32(20,45,70,10):IM_COL32(255,255,255,9));
+        ImGui::PushStyleColor(ImGuiCol_Border,RayFEM::UI::WithAlpha(palette.border,light?120:90));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,RayFEM::UI::CardRounding);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{timelinePadding+2,timelinePadding});
+        ImGui::BeginChild("Timeline",{0,height},ImGuiChildFlags_Borders|ImGuiChildFlags_AlwaysUseWindowPadding,
+                          ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::BeginDisabled(frames.empty());
+        // Transport buttons share one pill.
+        const float row=ImGui::GetFrameHeight();
+        auto button=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+2*style.FramePadding.x;};
+        const float groupWidth=button(previousFrameLabel)+playButtonWidth+button(nextFrameLabel)+4+8;
+        const ImVec2 group=ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(group,{group.x+groupWidth,group.y+row},ImGui::GetColorU32(ImGuiCol_FrameBg),RayFEM::UI::ControlRounding);
+        ImGui::PushStyleColor(ImGuiCol_Button,IM_COL32(0,0,0,0));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{2,style.ItemSpacing.y});
+        ImGui::SetCursorScreenPos({group.x+4,group.y});
         if(ImGui::Button(previousFrameLabel)) {if(selected>0)--selected;follow=false;playing=false;}
         Tip("Previous frame (Left arrow over the viewport)");ImGui::SameLine();
-        if(ImGui::Button(playing?ICON_FA_PAUSE "  Pause###play":ICON_FA_PLAY "  Play###play",{playButtonWidth,0}))
+        if(RayFEM::UI::ToggleButton(playing?ICON_FA_PAUSE "  Pause###play":ICON_FA_PLAY "  Play###play",playing,{playButtonWidth,0}))
             {playing=!playing;follow=false;lastPlay=GetTime();}
         Tip(playing?"Pause playback":"Play retained frames in a loop");
         ImGui::SameLine();
         if(ImGui::Button(nextFrameLabel)) {if(selected+1<static_cast<int>(frames.size()))++selected;follow=false;playing=false;}
-        Tip("Next frame (Right arrow over the viewport)");ImGui::SameLine();
+        Tip("Next frame (Right arrow over the viewport)");
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0,style.ItemSpacing.x*1.5f);
+        ImGui::SetCursorScreenPos({group.x+groupWidth+style.ItemSpacing.x*1.5f,group.y});
         ImGui::SetNextItemWidth(100);ImGui::SliderFloat("##fps",&playbackFps,1,60,"%.0f fps");
         Tip("Playback speed");ImGui::SameLine();
         if(RayFEM::UI::ToggleButton(liveLabel,follow)) {follow=!follow;playing=false;}
         Tip(follow?"Following incoming frames. Click to stay on the current frame.":"Jump to and follow the newest frame");
-        if(auto frame=Current()) {
+        if(Current()) {
+            // The current frame, right-aligned on the same row when it fits.
             const auto label=TimelineLabel();
-            RayFEM::UI::NextInlineItem(ImGui::CalcTextSize(label.c_str()).x);
+            const float labelWidth=ImGui::CalcTextSize(label.c_str()).x;
+            const float rightEdge=ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x;
+            if(RayFEM::UI::NextInlineItem(labelWidth+style.ItemSpacing.x)) ImGui::SameLine(std::max(ImGui::GetCursorPosX(),rightEdge-labelWidth));
             ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",label.c_str());
-            ImGui::SetNextItemWidth(-1);
-            char position[48];
-            std::snprintf(position,sizeof(position),"%%d / %d retained",static_cast<int>(frames.size())-1);
-            if(ImGui::SliderInt("##frame",&selected,0,static_cast<int>(frames.size())-1,position)) {follow=false;playing=false;}
+            char retained[48];
+            std::snprintf(retained,sizeof(retained),"%d / %d",selected+1,static_cast<int>(frames.size()));
+            const float countWidth=ImGui::CalcTextSize(retained).x;
+            const float trackWidth=std::max(40.0f,ImGui::GetContentRegionAvail().x-countWidth-style.ItemSpacing.x*2);
+            auto describe=[&](int index) {
+                const auto& metadata=frames[std::clamp(index,0,static_cast<int>(frames.size())-1)]->metadata;
+                char text[96];std::snprintf(text,sizeof(text),"Frame %u  ·  t %.6g",metadata.frame_index,metadata.sim_time);
+                return std::string(text);
+            };
+            if(RayFEM::UI::Scrubber("##frame",&selected,static_cast<int>(frames.size()),trackWidth,describe)) {follow=false;playing=false;}
+            ImGui::SameLine(0,style.ItemSpacing.x*2);
+            ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",retained);
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))ImGui::SetTooltip("Position among the retained frames");
         }
         ImGui::EndDisabled();
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
     }
 
     void DrawViewport(ImVec2 size) {
@@ -1685,7 +1737,7 @@ private:
     ElementPressIdentity elementPressIdentity{};
     int coloring=0;
     std::vector<int> excludedMaterials;
-    int inspectorTab=-1,plotTab=-1;
+    int inspectorTab=-1,inspectorPage=0,plotTab=-1;
     bool showPlots=true,pickingDof=false;
     float plotPanelHeight=0;
     std::deque<std::shared_ptr<RayFEM::RenderFrame>> frames;

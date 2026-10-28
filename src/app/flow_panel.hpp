@@ -9,6 +9,7 @@
 #include "rlgl.h"
 #include "streamline_renderer.hpp"
 #include "frame_pipeline.hpp"
+#include "widgets.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -106,14 +107,16 @@ public:
     }
 
     void Controls() {
-        ImGui::PushID("Vector flow controls");
-        const bool open=ImGui::CollapsingHeader("Vector flow",ImGuiTreeNodeFlags_DefaultOpen);
         constexpr const char* modeNames[]={nullptr,"Arrows","Streamlines","Both"};
-        RayFEM::UI::HeaderBadge(modeNames[std::clamp(mode,0,3)]);
-        if(!open) {ImGui::PopID();return;}
-        ImGui::SetNextItemWidth(-1);
-        ImGui::Combo("##mode",&mode,"Off\0Arrows\0Streamlines\0Arrows + streamlines\0");
-        Tip("Show directions or streamlines throughout the vector field.");
+        if(!RayFEM::UI::BeginSection("Vector flow",modeNames[std::clamp(mode,0,3)]))return;
+        ControlsBody();
+        RayFEM::UI::EndSection();
+    }
+private:
+    void ControlsBody() {
+        ImGui::PushID("Vector flow controls");
+        RayFEM::UI::Segmented("##mode",&mode,{"Off","Arrows","Lines","Both"});
+        Tip("Show directions (arrows), streamlines, or both throughout the vector field.");
         if(!Enabled()){ImGui::PopID();return;}
         if(!Supported())ImGui::TextWrapped("Choose a field with two or three vector components.");
         ImGui::PushItemWidth(-1);
@@ -125,9 +128,9 @@ public:
             Tip("Requested total across the selected domain. Zero vectors, clipping and the preview budget can produce fewer lines. Use Update flow for a denser result.");
         }
         ImGui::PopItemWidth();
-        ImGui::Checkbox("Through surfaces",&throughSurface);
+        RayFEM::UI::Switch("Through surfaces",&throughSurface);
         Tip("Keeps interior arrows and streamlines visible through the mesh. Turn off to use normal surface occlusion.");
-        ImGui::Checkbox("Automatic updates",&automatic);
+        RayFEM::UI::Switch("Automatic updates",&automatic);
         Tip("Updates at most four times per second, with a short compute budget. Pause on a frame and choose Update flow for more detail.");
         ImGui::BeginDisabled(!Supported());
         if(ImGui::Button("Update flow",{-1,0}))forceUpdate=true;
@@ -140,7 +143,7 @@ public:
             if(!currentRequest)ImGui::TextColored(RayFEM::UI::ThemeText(RayFEM::UI::Palette().warning),automatic?"Waiting to refresh":"Previous sample");
             else if(current->limited)ImGui::TextWrapped("Budget-limited preview. Update flow for more detail.");
         }
-        if(ImGui::CollapsingHeader("Flow settings")) {
+        if(ImGui::TreeNode("More settings")) {
             ImGui::PushItemWidth(-1);
             if(mode==1 || mode==3) {
                 RayFEM::UI::FieldLabel("Arrow length");ImGui::DragFloat("##arrow_length",&arrowLength,scale*.001f,scale*.001f,scale*.3f,"%.4g",ImGuiSliderFlags_AlwaysClamp);
@@ -149,23 +152,25 @@ public:
             if(mode>=2) {
                 RayFEM::UI::FieldLabel("Maximum path length");ImGui::DragFloat("##path_length",&pathLength,scale*.01f,scale*.02f,scale*20,"%.4g",ImGuiSliderFlags_AlwaysClamp);
                 RayFEM::UI::FieldLabel("Step length");ImGui::DragFloat("##step_length",&stepLength,scale*.0005f,scale*.001f,scale*.2f,"%.4g",ImGuiSliderFlags_AlwaysClamp);
-                RayFEM::UI::FieldLabel("Integration");ImGui::Combo("##integrator",&integrator,"RK2\0RK4\0");
-                ImGui::Checkbox("Both directions",&bidirectional);
-                ImGui::Checkbox("Moving highlight",&tracers);
+                ImGui::TextDisabled("Integration");RayFEM::UI::Segmented("##integrator",&integrator,{"RK2","RK4"});
+                RayFEM::UI::Switch("Both directions",&bidirectional);
+                RayFEM::UI::Switch("Moving highlight",&tracers);
                 Tip("A bright pulse travels along each steady streamline to show direction. It does not represent a particle trajectory across simulation frames.");
                 if(tracers) {
                     float percent=pulseLength*100;
                     RayFEM::UI::FieldLabel("Pulse length");
                     if(ImGui::SliderFloat("##pulse_length",&percent,3,40,"%.0f%%",ImGuiSliderFlags_AlwaysClamp))pulseLength=percent/100;
-                    ImGui::Checkbox("Thicken highlight",&thickenPulse);
+                    RayFEM::UI::Switch("Thicken highlight",&thickenPulse);
                 }
             }
             ImGui::PopItemWidth();
+            ImGui::TreePop();
         }
         if(!message.empty())ImGui::TextWrapped("%s",message.c_str());
         if(!colorError.empty())ImGui::TextWrapped("Flow colors unavailable: %s",colorError.c_str());
         ImGui::PopID();
     }
+public:
 
     // Selection participates in the sampling cache key. It is also applied to
     // drawing, so a throttled preview cannot reintroduce newly hidden regions.

@@ -2,6 +2,7 @@
 
 #include "libRayfem/frame/tracking.hpp"
 #include "plot.hpp"
+#include "widgets.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <chrono>
@@ -125,7 +126,8 @@ public:
     void Controls(const std::shared_ptr<RayFEM::RenderFrame>& frame,const std::string& field,
                   const RayFEM::RenderOptions& options,
                   const std::deque<std::shared_ptr<RayFEM::RenderFrame>>& history) {
-        if(!ImGui::CollapsingHeader("Frame tracking",ImGuiTreeNodeFlags_DefaultOpen)) return;
+        const std::string badge=tracks.empty()?"":std::to_string(tracks.size())+(tracks.size()==1?" track":" tracks");
+        if(!RayFEM::UI::BeginSection("Frame tracking",badge.c_str())) return;
         const char* names[]={"DOF coefficient","Minimum","Maximum","Mean","Integral","L2 norm","Point probe"};
         ImGui::SetNextItemWidth(-1);ImGui::Combo("##measurement",&kind,names,7);
         if(kind==0) {
@@ -188,6 +190,7 @@ public:
         }
         if(!message.empty()) ImGui::TextWrapped("%s",message.c_str());
         if(expired) {ImGui::TextDisabled("%zu frames evicted before sampling",expired);}
+        RayFEM::UI::EndSection();
     }
 
     void DrawPlot(ImVec2 size,const std::shared_ptr<RayFEM::RenderFrame>& current) const {

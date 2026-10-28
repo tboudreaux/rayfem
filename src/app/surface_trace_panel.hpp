@@ -3,6 +3,7 @@
 #include "libRayfem/frame/render.hpp"
 #include "libRayfem/profile/surface_trace.hpp"
 #include "plot.hpp"
+#include "widgets.hpp"
 #include "raymath.h"
 #include <algorithm>
 #include <chrono>
@@ -43,13 +44,17 @@ public:
                   mfem::GridFunction* field,const std::string& name,
                   const RayFEM::RenderOptions& options) {
         UpdateContext(frame,field,name,options);
+        if(!RayFEM::UI::BeginSection("Surface trace",enabled?"On":nullptr,false))return;
+        ControlsBody();
+        RayFEM::UI::EndSection();
+    }
+private:
+    void ControlsBody() {
         ImGui::PushID("Surface trace controls");
-        if(!ImGui::CollapsingHeader("Surface trace",ImGuiTreeNodeFlags_DefaultOpen)) {ImGui::PopID();return;}
-        ImGui::Checkbox("Enabled",&enabled);
+        RayFEM::UI::Switch("Enabled",&enabled);
         Tip("Measure a meridian or latitude on the outer surface.");
         if(!enabled) {ImGui::PopID();return;}
-        ImGui::SetNextItemWidth(-1);
-        if(ImGui::Combo("##trace_kind",&kind,"Meridian / colatitude\0Latitude / azimuth\0")) {
+        if(RayFEM::UI::Segmented("##trace_kind",&kind,{"Meridian","Latitude"})) {
             beginAngle=0;endAngle=kind==0?180:360;fixedAngle=kind==0?0:90;dirty=true;
         }
         RayFEM::UI::FieldLabel(kind==0?"Azimuth (degrees)":"Colatitude (degrees)");
@@ -66,7 +71,7 @@ public:
             ImGui::TextDisabled("%zu / %zu hits  ·  %.1f ms",valid,samples.size(),sampleMs);
             if(ImGui::IsItemHovered())ImGui::SetTooltip("Largest ray residual: %.6g\nGaps mark rays with no exterior hit. Only original exterior faces are traced; material exclusions are respected.",maxResidual);
         }
-        if(ImGui::CollapsingHeader("Trace settings")) {
+        if(ImGui::TreeNode("Trace settings")) {
             ImGui::PushItemWidth(-1);
             ImGui::TextDisabled("Center");dirty|=ImGui::DragFloat3("##center",&center.x,scale*.005f,0,0,"%.4g");
             Tip("Rays start here and use the nearest forward exterior hit. A center inside the object usually gives the clearest trace.");
@@ -85,18 +90,21 @@ public:
             }
             Tip("Curved intersection solves for the ray on the true curved face. Refined approximation uses triangle intersections projected onto that face; the residual reports alignment error.");
             ImGui::PopItemWidth();
+            ImGui::TreePop();
         }
-        if(!samples.empty() && ImGui::CollapsingHeader("Export")) {
+        if(!samples.empty() && ImGui::TreeNode("Export")) {
             ImGui::TextDisabled("CSV destination");ImGui::SetNextItemWidth(-1);ImGui::InputText("##path",path,sizeof(path));
             ImGui::BeginDisabled(dirty);
             if(ImGui::Button("Save CSV",{-1,0}))Export();
             Tip("Includes angle in radians, distance, physical position, and face details.");
             ImGui::EndDisabled();
             if(dirty)ImGui::TextWrapped("Update the trace before exporting.");
+            ImGui::TreePop();
         }
         if(!message.empty())ImGui::TextWrapped("%s",message.c_str());
         ImGui::PopID();
     }
+public:
 
     void DrawGuide(const Camera3D& camera) const {
         if(!enabled || !context || !context->mesh || context->mesh->SpaceDimension()!=3)return;
