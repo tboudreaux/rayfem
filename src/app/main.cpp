@@ -353,13 +353,18 @@ private:
             frames.push_back(std::move(frame));
         }
         while (frames.size() > static_cast<size_t>(opts.history) || (frames.size()>1 && HistoryBytes()>256ULL*1024*1024)) {
-            auto oldest = frames.front();
+            // A frame viewed while not following stays put: evict the next
+            // oldest instead, so a paused view does not advance on its own.
+            const std::size_t victim = !follow && selected == 0 && frames.size() > 1 ? 1 : 0;
+            const auto evicted = frames[victim];
             for (auto it=cache.begin(); it!=cache.end();) {
-                if (it->frame == oldest) { ReleaseView(*it); it=cache.erase(it); }
+                // The surface on screen (the newest entry) stays until a
+                // newer one replaces it; dropping it would blank the view.
+                if (it->frame == evicted && &*it != &cache.back()) { ReleaseView(*it); it=cache.erase(it); }
                 else ++it;
             }
-            frames.pop_front();
-            --selected;
+            frames.erase(frames.begin() + victim);
+            if (static_cast<int>(victim) < selected) --selected;
         }
         if (follow && !frames.empty()) selected = static_cast<int>(frames.size()) - 1;
         else if (!frames.empty()) selected = std::clamp(selected, 0, static_cast<int>(frames.size()) - 1);
