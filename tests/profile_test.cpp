@@ -185,11 +185,45 @@ void DisplacementCase(RayFEM::ProfileRegistry& registry) {
         for(const auto& point:actual) {Check(point.valid,"Displaced geometry inverse finds interior");Near(point.value,(point.position[0]-.2)+2*(point.position[1]-.4),1e-10,"Profile evaluates original field on displaced geometry");}
     }
     for(int i=0;i<original.Size();++i) Near((*mesh.GetNodes())[i],original[i],0,"Profile must not mutate base mesh");
-    mfem::H1_FECollection mismatch_collection(1,2);
-    mfem::FiniteElementSpace mismatch_space(&mesh,&mismatch_collection,2);
-    mfem::GridFunction mismatch(&mismatch_space);mismatch=0;
-    options.displacement=&mismatch;
-    Reject([&] {registry.sample("exhaustive",mesh,field,locations,options);},"Unsupported displacement FE must reject explicitly");
+    // Displacements outside the geometry space are interpolated into richer
+    // nodes. A lower-order translation is held exactly.
+    mfem::H1_FECollection linear_collection(1,2);
+    mfem::FiniteElementSpace linear_space(&mesh,&linear_collection,2);
+    mfem::GridFunction linear(&linear_space);linear.ProjectCoefficient(translation);
+    options.displacement=&linear;
+    for(const std::string algorithm:{"exhaustive","coherent"}) {
+        const auto actual=registry.sample(algorithm,mesh,field,locations,options);
+        for(const auto& point:actual) {Check(point.valid,"Lower-order displacement inverse finds interior");Near(point.value,(point.position[0]-.2)+2*(point.position[1]-.4),1e-10,"Lower-order displacement geometry");}
+    }
+    for(int i=0;i<original.Size();++i) Near((*mesh.GetNodes())[i],original[i],0,"Interpolated displacement must not mutate base mesh");
+    // A quadratic displacement on a straight mesh with no nodes: x' = x and
+    // y' = y + x^2/4, so a displayed point came from (x', y' - x'^2/4).
+    auto straight=mfem::Mesh::MakeCartesian2D(2,2,mfem::Element::QUADRILATERAL,true);
+    mfem::H1_FECollection quadratic_collection(2,2);
+    mfem::FiniteElementSpace straight_field_space(&straight,&quadratic_collection);
+    mfem::FiniteElementSpace quadratic_space(&straight,&quadratic_collection,2,mfem::Ordering::byNODES);
+    mfem::GridFunction straight_field(&straight_field_space),bend(&quadratic_space);
+    straight_field.ProjectCoefficient(coefficient);
+    mfem::VectorFunctionCoefficient bending(2,[](const mfem::Vector& x,mfem::Vector& y){y.SetSize(2);y[0]=0;y[1]=.25*x[0]*x[0];});
+    bend.ProjectCoefficient(bending);
+    RayFEM::RenderOptions bent;bent.displacement=&bend;
+    const auto across=RayFEM::MakeRaySamples({.1,.55,0},{1,0,0},.8,13);
+    for(const std::string algorithm:{"exhaustive","coherent"}) {
+        const auto actual=registry.sample(algorithm,straight,straight_field,across,bent);
+        for(const auto& point:actual) {
+            Check(point.valid,"Higher-order displacement inverse finds interior");
+            const double x=point.position[0],y=point.position[1]-.25*x*x;
+            Near(point.value,x+2*y,1e-9,"Higher-order displacement on a straight mesh");
+        }
+    }
+    Check(straight.GetNodes()==nullptr,"Straight base mesh keeps no nodes");
+    // A discontinuous displacement field uses discontinuous display nodes.
+    mfem::L2_FECollection broken_collection(1,2);
+    mfem::FiniteElementSpace broken_space(&mesh,&broken_collection,2);
+    mfem::GridFunction broken(&broken_space);broken.ProjectCoefficient(translation);
+    options.displacement=&broken;
+    const auto actual=registry.sample("coherent",mesh,field,locations,options);
+    for(const auto& point:actual) {Check(point.valid,"Discontinuous displacement inverse finds interior");Near(point.value,(point.position[0]-.2)+2*(point.position[1]-.4),1e-10,"Discontinuous displacement geometry");}
     std::cout << "PASS displacement inverse and unchanged base mesh\n";
 }
 class TestAlgorithm final : public RayFEM::ProfileAlgorithm {

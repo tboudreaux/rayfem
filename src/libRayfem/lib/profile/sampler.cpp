@@ -27,6 +27,47 @@ ProfilePosition Cross(const ProfilePosition& a, const ProfilePosition& b) {
     return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
 }
 
+// True when the displacement shares the geometry's basis and DOF numbering,
+// so displaced nodes are the node coefficients plus scaled displacement ones.
+bool SharesGeometrySpace(const mfem::Mesh& mesh, const mfem::FiniteElementSpace& geometry_space,
+                         const mfem::FiniteElementSpace& displacement_space) {
+    if (geometry_space.GetNDofs() != displacement_space.GetNDofs() ||
+        geometry_space.GetVDim() != displacement_space.GetVDim() ||
+        std::string(geometry_space.FEColl()->Name()) != displacement_space.FEColl()->Name()) {
+        return false;
+    }
+    const auto* geometry_nurbs = geometry_space.GetNURBSext();
+    const auto* displacement_nurbs = displacement_space.GetNURBSext();
+    if (bool(geometry_nurbs) != bool(displacement_nurbs)) { return false; }
+    if (geometry_nurbs) {
+        if (geometry_nurbs->GetNKV() != displacement_nurbs->GetNKV() ||
+            geometry_nurbs->GetWeights().Size() != displacement_nurbs->GetWeights().Size()) {
+            return false;
+        }
+        for (int i = 0; i < geometry_nurbs->GetWeights().Size(); ++i) {
+            if (geometry_nurbs->GetWeights()[i] != displacement_nurbs->GetWeights()[i]) { return false; }
+        }
+        for (int i = 0; i < geometry_nurbs->GetNKV(); ++i) {
+            const auto& a = *geometry_nurbs->GetKnotVector(i);
+            const auto& b = *displacement_nurbs->GetKnotVector(i);
+            if (a.Size() != b.Size() || a.GetOrder() != b.GetOrder()) { return false; }
+            for (int k = 0; k < a.Size(); ++k) { if (a[k] != b[k]) { return false; } }
+        }
+    }
+    // DOF ordering may differ (byNODES/byVDIM), but scalar DOF numbering must
+    // match before the two coefficient arrays can be composed.
+    mfem::Array<int> geometry_dofs, displacement_dofs;
+    for (int e = 0; e < mesh.GetNE(); ++e) {
+        geometry_space.GetElementDofs(e, geometry_dofs);
+        displacement_space.GetElementDofs(e, displacement_dofs);
+        if (geometry_dofs.Size() != displacement_dofs.Size()) { return false; }
+        for (int j = 0; j < geometry_dofs.Size(); ++j) {
+            if (geometry_dofs[j] != displacement_dofs[j]) { return false; }
+        }
+    }
+    return true;
+}
+
 std::unique_ptr<mfem::Mesh> DisplacedGeometry(mfem::Mesh& mesh, const RayFEM::RenderOptions& options) {
     if (!std::isfinite(options.displacement_scale)) { throw std::invalid_argument("Displacement scale must be finite"); }
     if (!options.displacement || options.displacement_scale == 0) { return nullptr; }
@@ -40,59 +81,51 @@ std::unique_ptr<mfem::Mesh> DisplacedGeometry(mfem::Mesh& mesh, const RayFEM::Re
     // EnsureNodes converts NURBS to polynomial H1 even when nodes exist.
     if (!displayed->GetNodes()) { displayed->EnsureNodes(); }
     construction.unlock();
+    const int space_dimension = mesh.SpaceDimension();
+    if (SharesGeometrySpace(mesh, *displayed->GetNodes()->FESpace(), *displacement_space)) {
+        auto& nodes = *displayed->GetNodes();
+        const auto* geometry_space = nodes.FESpace();
+        for (int i = 0; i < geometry_space->GetNDofs(); ++i) {
+            for (int d = 0; d < space_dimension; ++d) {
+                auto& coordinate = nodes[geometry_space->DofToVDof(i, d)];
+                coordinate += options.displacement_scale*(*options.displacement)[displacement_space->DofToVDof(i, d)];
+                if (!std::isfinite(coordinate)) { throw std::invalid_argument("Displaced geometry has non-finite coordinates"); }
+            }
+        }
+        displayed->NodesUpdated();
+        return displayed;
+    }
+    // Any other displacement space (another order, a separate DOF numbering
+    // such as a field transferred to a submesh, or a discontinuous basis):
+    // give the copy nodes rich enough for both the geometry and the
+    // displacement, then set each node to its original position plus the
+    // scaled displacement, both evaluated in the original element.
+    const int geometry_order = mesh.GetNodes() ? mesh.GetNodalFESpace()->GetMaxElementOrder() : 1;
+    const int order = std::max({1, geometry_order, displacement_space->GetMaxElementOrder()});
+    const bool discontinuous = dynamic_cast<const mfem::L2_FECollection*>(displacement_space->FEColl()) != nullptr;
+    construction.lock();
+    if (displayed->NURBSext) { displayed->EnsureNodes(); }
+    displayed->SetCurvature(order, discontinuous, space_dimension, mfem::Ordering::byVDIM);
+    construction.unlock();
     auto& nodes = *displayed->GetNodes();
-    const auto* geometry_space = nodes.FESpace();
-    if (geometry_space->GetNDofs() != displacement_space->GetNDofs() ||
-        geometry_space->GetVDim() != displacement_space->GetVDim() ||
-        std::string(geometry_space->FEColl()->Name()) != displacement_space->FEColl()->Name()) {
-        throw std::invalid_argument("Displaced profiles require a displacement in the mesh geometry finite element space; other displacement spaces are unavailable");
-    }
-    const auto* geometry_nurbs = geometry_space->GetNURBSext();
-    const auto* displacement_nurbs = displacement_space->GetNURBSext();
-    if (bool(geometry_nurbs) != bool(displacement_nurbs)) {
-        throw std::invalid_argument("Displaced profiles require matching rational geometry bases");
-    }
-    if (geometry_nurbs) {
-        if (geometry_nurbs->GetNKV() != displacement_nurbs->GetNKV() ||
-            geometry_nurbs->GetWeights().Size() != displacement_nurbs->GetWeights().Size()) {
-            throw std::invalid_argument("Displaced profiles require matching NURBS knots and weights");
-        }
-        for (int i = 0; i < geometry_nurbs->GetWeights().Size(); ++i) {
-            if (geometry_nurbs->GetWeights()[i] != displacement_nurbs->GetWeights()[i]) {
-                throw std::invalid_argument("Displaced profiles require matching NURBS weights");
-            }
-        }
-        for (int i = 0; i < geometry_nurbs->GetNKV(); ++i) {
-            const auto& a = *geometry_nurbs->GetKnotVector(i);
-            const auto& b = *displacement_nurbs->GetKnotVector(i);
-            if (a.Size() != b.Size() || a.GetOrder() != b.GetOrder()) {
-                throw std::invalid_argument("Displaced profiles require matching NURBS knot orders");
-            }
-            for (int k = 0; k < a.Size(); ++k) {
-                if (a[k] != b[k]) { throw std::invalid_argument("Displaced profiles require matching NURBS knots"); }
-            }
-        }
-    }
-    // DOF ordering may differ (byNODES/byVDIM), but scalar DOF numbering must
-    // match. Compare connectivity before composing the two coefficient arrays.
-    mfem::Array<int> geometry_dofs, displacement_dofs;
+    const auto& node_space = *nodes.FESpace();
+    mfem::Array<int> vdofs;
+    mfem::Vector position, displacement;
     for (int e = 0; e < mesh.GetNE(); ++e) {
-        geometry_space->GetElementDofs(e, geometry_dofs);
-        displacement_space->GetElementDofs(e, displacement_dofs);
-        if (geometry_dofs.Size() != displacement_dofs.Size()) {
-            throw std::invalid_argument("Displaced profile geometry and displacement bases differ");
-        }
-        for (int j = 0; j < geometry_dofs.Size(); ++j) {
-            if (geometry_dofs[j] != displacement_dofs[j]) {
-                throw std::invalid_argument("Displaced profile geometry and displacement DOF numbering differ");
+        const auto& reference_nodes = node_space.GetFE(e)->GetNodes();
+        node_space.GetElementVDofs(e, vdofs);
+        auto& transform = *mesh.GetElementTransformation(e);
+        for (int j = 0; j < reference_nodes.GetNPoints(); ++j) {
+            const auto& ip = reference_nodes.IntPoint(j);
+            transform.SetIntPoint(&ip);
+            transform.Transform(ip, position);
+            options.displacement->GetVectorValue(transform, ip, displacement);
+            for (int d = 0; d < space_dimension; ++d) {
+                const double coordinate = position[d] + options.displacement_scale*displacement[d];
+                if (!std::isfinite(coordinate)) { throw std::invalid_argument("Displaced geometry has non-finite coordinates"); }
+                const int vdof = vdofs[j + d*reference_nodes.GetNPoints()];
+                nodes[vdof >= 0 ? vdof : -1 - vdof] = coordinate;
             }
-        }
-    }
-    for (int i = 0; i < geometry_space->GetNDofs(); ++i) {
-        for (int d = 0; d < mesh.SpaceDimension(); ++d) {
-            auto& coordinate = nodes[geometry_space->DofToVDof(i, d)];
-            coordinate += options.displacement_scale*(*options.displacement)[displacement_space->DofToVDof(i, d)];
-            if (!std::isfinite(coordinate)) { throw std::invalid_argument("Displaced geometry has non-finite coordinates"); }
         }
     }
     displayed->NodesUpdated();

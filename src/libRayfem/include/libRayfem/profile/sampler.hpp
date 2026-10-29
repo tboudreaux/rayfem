@@ -34,9 +34,11 @@ std::array<ProfilePosition, 2> PlaneAxes(ProfilePosition normal);
 std::vector<ProfileSample> MakePlaneSamples(ProfilePosition center, ProfilePosition normal,
                                             double width, double height, int columns, int rows);
 
-// Exact copy of the displayed nodal geometry, shared by inverse profiles and
-// physical integration. Returns nullptr when no displacement is active. A
-// displacement in a different geometry basis is explicitly unavailable.
+// Copy of the displayed geometry, shared by inverse profiles and physical
+// integration. Returns nullptr when no displacement is active. A displacement
+// in the geometry's own space is added exactly; any other spatial vector
+// field on the mesh is interpolated into nodes of order max(geometry,
+// displacement), which is exact whenever that nodal space holds it.
 std::unique_ptr<mfem::Mesh> MakeDisplacedMesh(mfem::Mesh& mesh, const RenderOptions& options);
 
 class ProfileAlgorithm {
