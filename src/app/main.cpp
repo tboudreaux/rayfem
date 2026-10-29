@@ -43,6 +43,7 @@
 #include "dof_renderer.hpp"
 #include "ray_placement.hpp"
 #include "widgets.hpp"
+#include "figure_export.hpp"
 #include "element_picker.hpp"
 #include "element_panel.hpp"
 #include "mouse_modifiers.hpp"
@@ -221,6 +222,7 @@ public:
         ClearCache();
         flow.ClearGraphics();
         streamlineRenderer.Shutdown();
+        figureExporter.Shutdown();
         edgeRenderer.Shutdown();
         dofRenderer.Shutdown();
         rayPlacement.Shutdown();
@@ -778,7 +780,10 @@ private:
         }
         if ((ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper) && ImGui::IsKeyPressed(ImGuiKey_O))
             fileDialog.Open();
+        if ((ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper) && ImGui::IsKeyPressed(ImGuiKey_E,false))
+            figureExporter.Open(FigureScene());
         DrawArchiveDialogs();
+        figureExporter.Draw(FigureScene());
         ImGui::Spacing();
         auto frame=Current();auto* gf=Field(frame);
         elements.Context(frame);
@@ -870,6 +875,8 @@ private:
             {flow.Open();inspectorTab=0;}
         if(action(ICON_FA_SQUARE_POLL_VERTICAL "  Plots",showPlots,showPlots?"Hide the plot panel":"Show the plot panel",true))
             showPlots=!showPlots;
+        if(action(ICON_FA_IMAGE "  Export",false,"Export the 3D view as a PNG or PDF figure, with axes and a colorbar (Cmd/Ctrl+E).",true))
+            figureExporter.Open(FigureScene());
         const float available=ImGui::GetContentRegionAvail().y;
         const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || tracking.HasTracks() || plotTab==1);
         float plotHeight=0;
@@ -918,6 +925,40 @@ private:
         } else if(profileClipping) {
             clip=savedClip;slicePoint=savedSlicePoint;sliceNormal=savedSliceNormal;profileClipping=false;
         }
+    }
+
+    // The current view for figure export: how to draw it, what hides what,
+    // and the colorbar it shows.
+    RayFEM::UI::Figure::Scene FigureScene() {
+        RayFEM::UI::Figure::Scene scene;
+        ViewCache* shown=cache.empty()?nullptr:&cache.back();
+        scene.camera=camera;
+        scene.viewport={std::max(1.f,viewportSize.x),std::max(1.f,viewportSize.y)};
+        scene.hasMesh=shown && shown->vertices;
+        if(shown)scene.bounds=shown->bounds;
+        scene.render=[this,shown](RenderTexture2D& into,Color background,float lineScale,bool guides) {
+            const Vector2 lineViewport{into.texture.width/lineScale,into.texture.height/lineScale};
+            RenderScene(into,shown,background,lineViewport,{.reference=false,.selection=false,.guides=guides});
+        };
+        if(shown && showSurface) {
+            const float slack=std::max(1e-6f,radius*1e-3f);
+            const Vector3 eye=camera.position;
+            scene.visible=[shown,eye,slack](Vector3 p) {
+                const Vector3 toward=Vector3Subtract(p,eye);
+                const float distance=Vector3Length(toward);
+                const auto hit=shown->picker.Pick({eye,toward});
+                return !hit || hit->distance>=distance-slack;
+            };
+        }
+        if(shown && shown->hasFieldRange && coloring==0) {
+            scene.hasColorBar=true;scene.mapping=shown->colorMapping;
+            scene.map=static_cast<RayFEM::ColorMap>(colorMap);scene.reverse=reverseColors;scene.field=fieldName;
+        }
+        scene.theme=RayFEM::UI::Palette().viewport_background;
+        const ImU32 text=RayFEM::UI::Palette().text;
+        scene.themeText={static_cast<unsigned char>(text&0xff),static_cast<unsigned char>((text>>8)&0xff),static_cast<unsigned char>((text>>16)&0xff),255};
+        if(shown && shown->frame)scene.frame=shown->frame->metadata.frame_index;
+        return scene;
     }
 
     // The element viewer for ray endpoints, as its own window over the viewport.
@@ -1317,6 +1358,77 @@ private:
         ImGui::PopStyleColor(2);
     }
 
+    // Which viewport extras a render includes; figures leave out the
+    // reference plane, selection and (by default) analysis guides.
+    struct SceneLayers { bool reference=true, selection=true, guides=true; };
+    // Draw the 3D scene into a render texture. lineViewport sets the pixel
+    // scale of edges, contours, streamlines and DOF markers.
+    void RenderScene(RenderTexture2D& into,ViewCache* active,Color background,Vector2 lineViewport,SceneLayers layers) {
+        const bool referencePlaneVisible=!active || keepReferencePlane;
+        const auto referenceGrid=RayFEM::ReferencePlaneGrid(active?active->bounds:BoundingBox{},radius,
+            active && active->vertices,referenceRotation);
+        Vector3 normal=Vector3Normalize(sliceNormal);
+        // The CPU cut includes the section cap. A second shader discard would
+        // incorrectly remove cap fragments through floating-point roundoff.
+        int enabled=0;
+        SetShaderValue(shader,normalLoc,&normal,SHADER_UNIFORM_VEC3);
+        SetShaderValue(shader,pointLoc,&slicePoint,SHADER_UNIFORM_VEC3);
+        SetShaderValue(shader,enabledLoc,&enabled,SHADER_UNIFORM_INT);
+        float depthBias=(showBoundaries || wireframe || (showContours && coloring==0))?1.5f:0;
+        SetShaderValue(shader,depthBiasLoc,&depthBias,SHADER_UNIFORM_FLOAT);
+        BeginTextureMode(into);
+        ClearBackground(background);
+        const double savedNear=rlGetCullDistanceNear(),savedFar=rlGetCullDistanceFar();
+        if (active && active->vertices) {
+            // Fit the depth range to the scene. The render texture may have a
+            // 16-bit depth buffer; the default .01..1000 range loses enough
+            // precision to break coplanar element outlines into dashes.
+            auto depthBounds=active->bounds;
+            if(referencePlaneVisible) {
+                depthBounds.min=Vector3Min(depthBounds.min,referenceGrid.bounds.min);
+                depthBounds.max=Vector3Max(depthBounds.max,referenceGrid.bounds.max);
+            }
+            Vector3 center=Vector3Scale(Vector3Add(depthBounds.min,depthBounds.max),0.5f);
+            float extent=std::max(0.01f,Vector3Length(Vector3Subtract(depthBounds.max,depthBounds.min))*0.5f);
+            Vector3 forward=Vector3Normalize(Vector3Subtract(camera.target,camera.position));
+            float depth=Vector3DotProduct(Vector3Subtract(center,camera.position),forward);
+            double nearPlane=std::max(extent*0.001f,depth-extent*2);
+            rlSetClipPlanes(nearPlane,std::max(nearPlane*2,static_cast<double>(depth+extent*4)));
+        }
+        BeginMode3D(camera);
+        rlDisableBackfaceCulling();
+        if(layers.reference && referencePlaneVisible)DrawReferencePlane(referenceGrid);
+        if (active) {
+            if (showSurface) DrawModel(active->model,{0,0,0},1,WHITE);
+            if(layers.selection && active->selectionModel.meshCount) {
+                rlDrawRenderBatchActive();
+                if(showSurface)rlDisableDepthMask();
+                const float selectionBias=-.25f;
+                SetShaderValue(shader,depthBiasLoc,&selectionBias,SHADER_UNIFORM_FLOAT);
+                DrawModel(active->selectionModel,{0,0,0},1,WHITE);
+                rlDrawRenderBatchActive();
+                SetShaderValue(shader,depthBiasLoc,&depthBias,SHADER_UNIFORM_FLOAT);
+                rlEnableDepthMask();
+            }
+            if (wireframe) DrawModelWires(active->model,{0,0,0},1,RayFEM::UI::Palette().mesh_wire);
+            if (showBoundaries) DrawBoundaries(*active,lineViewport);
+            if (showContours && coloring==0) DrawContours(*active,lineViewport);
+            const RayFEM::ClipPlane flowPlane{slicePoint,sliceNormal};
+            flow.Draw(camera,GetTime(),streamlineRenderer,lineViewport,active->retainedElements.empty()?nullptr:&active->retainedElements,
+                      clip && clipMode==0?&flowPlane:nullptr);
+            if (showDofs) DrawDofMarkers(*active,lineViewport);
+        }
+        if (layers.guides) {
+            if (planeGuide) DrawPlaneGuide();
+            profiles.DrawGuide();
+            surfaceTrace.DrawGuide(camera);
+        }
+        rlEnableBackfaceCulling();
+        EndMode3D();
+        rlSetClipPlanes(savedNear,savedFar);
+        EndTextureMode();
+    }
+
     void DrawViewport(ImVec2 size) {
         int width=std::max(1,static_cast<int>(size.x)),height=std::max(1,static_cast<int>(size.y));
         if (!target.id || width!=target.texture.width || height!=target.texture.height) {
@@ -1402,9 +1514,6 @@ private:
             try {RefreshSelection(*active);}
             catch(const std::exception& e) {error=e.what();}
         }
-        const bool referencePlaneVisible=!active || keepReferencePlane;
-        const auto referenceGrid=RayFEM::ReferencePlaneGrid(active?active->bounds:BoundingBox{},radius,
-            active && active->vertices,referenceRotation);
         if(active && active->vertices) {profiles.SetBounds(active->bounds,active->frame->mesh);surfaceTrace.SetBounds(active->bounds,active->frame->mesh);}
         if(active) {
             flow.UpdateContext(active->frame,Field(active->frame),fieldName,RenderSettings(active->frame));
@@ -1415,64 +1524,7 @@ private:
         if(pickingDof && !ImGui::IsAnyItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape,false) &&
            !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))pickingDof=false;
         if(RayFEM::UpdateCameraViewTransition(camera,cameraTransition,GetTime()))cameraAdjusted=true;
-        Vector3 normal=Vector3Normalize(sliceNormal);
-        // The CPU cut includes the section cap. A second shader discard would
-        // incorrectly remove cap fragments through floating-point roundoff.
-        int enabled=0;
-        SetShaderValue(shader,normalLoc,&normal,SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader,pointLoc,&slicePoint,SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader,enabledLoc,&enabled,SHADER_UNIFORM_INT);
-        float depthBias=(showBoundaries || wireframe || (showContours && coloring==0))?1.5f:0;
-        SetShaderValue(shader,depthBiasLoc,&depthBias,SHADER_UNIFORM_FLOAT);
-        BeginTextureMode(target);
-        ClearBackground(RayFEM::UI::Palette().viewport_background);
-        const double savedNear=rlGetCullDistanceNear(),savedFar=rlGetCullDistanceFar();
-        if (active && active->vertices) {
-            // Fit the depth range to the scene. The render texture may have a
-            // 16-bit depth buffer; the default .01..1000 range loses enough
-            // precision to break coplanar element outlines into dashes.
-            auto depthBounds=active->bounds;
-            if(referencePlaneVisible) {
-                depthBounds.min=Vector3Min(depthBounds.min,referenceGrid.bounds.min);
-                depthBounds.max=Vector3Max(depthBounds.max,referenceGrid.bounds.max);
-            }
-            Vector3 center=Vector3Scale(Vector3Add(depthBounds.min,depthBounds.max),0.5f);
-            float extent=std::max(0.01f,Vector3Length(Vector3Subtract(depthBounds.max,depthBounds.min))*0.5f);
-            Vector3 forward=Vector3Normalize(Vector3Subtract(camera.target,camera.position));
-            float depth=Vector3DotProduct(Vector3Subtract(center,camera.position),forward);
-            double nearPlane=std::max(extent*0.001f,depth-extent*2);
-            rlSetClipPlanes(nearPlane,std::max(nearPlane*2,static_cast<double>(depth+extent*4)));
-        }
-        BeginMode3D(camera);
-        rlDisableBackfaceCulling();
-        if(referencePlaneVisible)DrawReferencePlane(referenceGrid);
-        if (active) {
-            if (showSurface) DrawModel(active->model,{0,0,0},1,WHITE);
-            if(active->selectionModel.meshCount) {
-                rlDrawRenderBatchActive();
-                if(showSurface)rlDisableDepthMask();
-                const float selectionBias=-.25f;
-                SetShaderValue(shader,depthBiasLoc,&selectionBias,SHADER_UNIFORM_FLOAT);
-                DrawModel(active->selectionModel,{0,0,0},1,WHITE);
-                rlDrawRenderBatchActive();
-                SetShaderValue(shader,depthBiasLoc,&depthBias,SHADER_UNIFORM_FLOAT);
-                rlEnableDepthMask();
-            }
-            if (wireframe) DrawModelWires(active->model,{0,0,0},1,RayFEM::UI::Palette().mesh_wire);
-            if (showBoundaries) DrawBoundaries(*active);
-            if (showContours && coloring==0) DrawContours(*active);
-            const RayFEM::ClipPlane flowPlane{slicePoint,sliceNormal};
-            flow.Draw(camera,GetTime(),streamlineRenderer,{float(width),float(height)},active->retainedElements.empty()?nullptr:&active->retainedElements,
-                      clip && clipMode==0?&flowPlane:nullptr);
-            if (showDofs) DrawDofMarkers(*active,{float(width),float(height)});
-        }
-        if (planeGuide) DrawPlaneGuide();
-        profiles.DrawGuide();
-        surfaceTrace.DrawGuide(camera);
-        rlEnableBackfaceCulling();
-        EndMode3D();
-        rlSetClipPlanes(savedNear,savedFar);
-        EndTextureMode();
+        RenderScene(target,active,RayFEM::UI::Palette().viewport_background,{float(width),float(height)},{});
         // Allocate the same viewport item used for camera/handle hit testing,
         // then round only the displayed texture's outer corners.
         ImGui::Dummy(size);
@@ -1730,7 +1782,7 @@ private:
 
     // Isolines at levels spaced along the colorbar. Streamed surfaces arrive
     // with them; a new count or color range re-extracts from the kept values.
-    void DrawContours(ViewCache& active) {
+    void DrawContours(ViewCache& active,Vector2 lineViewport) {
         if(!active.hasFieldRange || active.soupValues.empty())return;
         try {
             const auto levels=RayFEM::ContourLevels(active.colorMapping,contourCount);
@@ -1744,12 +1796,12 @@ private:
                 active.contoursUploaded=true;
                 TrimViewCache();
             }
-            edgeRenderer.Draw(active.contourModel,camera,{float(target.texture.width),float(target.texture.height)},
+            edgeRenderer.Draw(active.contourModel,camera,lineViewport,
                 radius,RayFEM::UI::Palette().mesh_edges,false);
         } catch(const std::exception& e){error=e.what();}
     }
 
-    void DrawBoundaries(ViewCache& active) {
+    void DrawBoundaries(ViewCache& active,Vector2 lineViewport) {
         try {
             if (!active.boundaries_ready) {
                 active.boundaries=RayFEM::BuildElementBoundaries(*active.frame->mesh,RenderSettings(active.frame));
@@ -1760,7 +1812,7 @@ private:
                 active.edges_uploaded=true;
                 TrimViewCache();
             }
-            edgeRenderer.Draw(active.edgeModel,camera,{float(target.texture.width),float(target.texture.height)},
+            edgeRenderer.Draw(active.edgeModel,camera,lineViewport,
                 radius,RayFEM::UI::Palette().mesh_edges,coloring==2);
         } catch(const std::exception& e){error=e.what();active.boundaries_ready=true;}
     }
@@ -1905,6 +1957,7 @@ private:
     RenderTexture2D target{};
     Shader shader{};
     RayFEM::UI::EdgeRenderer edgeRenderer;
+    RayFEM::UI::Figure::Exporter figureExporter;
     RayFEM::UI::DofRenderer dofRenderer;
     RayFEM::UI::RayPlacement rayPlacement;
     ImVec2 viewportOrigin{},viewportSize{};

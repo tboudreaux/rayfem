@@ -39,6 +39,10 @@ contours_test = executable('contours_test', 'contours_test.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 test('contours', contours_test, timeout: 60)
 
+figure_test = executable('figure_test', 'figure_test.cpp',
+    dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
+test('figure', figure_test, timeout: 120)
+
 # Requires a desktop graphics session; run explicitly (see README).
 executable('viewer_test', 'viewer_test.cpp', dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 executable('curvature_viewer_test', 'curvature_viewer_test.cpp',
