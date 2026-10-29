@@ -33,9 +33,10 @@ if build_viewer
         viewer_objcpp_args = ['-std=c++23']
         viewer_sources += files('app/mouse_modifiers.mm')
     endif
-    executable('RayFEM', viewer_sources,
+    rayfem_viewer = executable('RayFEM', viewer_sources,
         dependencies: [app_dependencies, rayfem_dep],
         cpp_args: cpp_args, c_args: c_args, objcpp_args: viewer_objcpp_args, link_args: link_args,
+        build_rpath: ':'.join(serif_runtime_dirs + runtime_dirs),
         install: true, install_rpath: viewer_install_rpath)
 endif
 

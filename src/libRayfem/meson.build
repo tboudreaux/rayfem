@@ -29,7 +29,7 @@ libRayFem = library(
     dependencies: dependencies,
     cpp_args: cpp_args,
     link_whole: serif_adapter,
-    build_rpath: ':'.join(serif_runtime_dirs),
+    build_rpath: ':'.join(serif_runtime_dirs + runtime_dirs),
     install_rpath: ':'.join(serif_runtime_dirs + runtime_dirs + [get_option('prefix') / get_option('libdir')]),
     install: true
 )
