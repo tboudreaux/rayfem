@@ -1,4 +1,4 @@
-#include "../src/app/edge_renderer.hpp"
+#include "render/edge_renderer.hpp"
 #include "raymath.h"
 #include "rlgl.h"
 #include <algorithm>

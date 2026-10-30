@@ -1,6 +1,6 @@
 #pragma once
 
-#include "figure.hpp"
+#include "figure/figure.hpp"
 
 #include <cstdint>
 #include <cstdlib>

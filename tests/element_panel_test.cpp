@@ -1,4 +1,4 @@
-#include "../src/app/element_panel.hpp"
+#include "panels/element_panel.hpp"
 #include <iostream>
 #include <stdexcept>
 

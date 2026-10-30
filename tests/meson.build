@@ -58,11 +58,11 @@ executable('curvature_viewer_test', 'curvature_viewer_test.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 
 camera_test = executable('camera_controller_test', 'camera_controller_test.cpp',
-    dependencies: raylib_dep)
+    dependencies: [raylib_dep, viewer_headers_dep])
 test('camera_controller', camera_test, timeout: 30)
 
 reference_plane_test = executable('reference_plane_test', 'reference_plane_test.cpp',
-    dependencies: raylib_dep)
+    dependencies: [raylib_dep, viewer_headers_dep])
 test('reference_plane', reference_plane_test, timeout: 30)
 
 orientation_cube_test = executable('orientation_cube_test', 'orientation_cube_test.cpp',
@@ -153,7 +153,7 @@ element_panel_test = executable('element_panel_test', 'element_panel_test.cpp',
 test('element_panel', element_panel_test, timeout: 30)
 
 streamline_pulse_test = executable('streamline_pulse_test', 'streamline_pulse_test.cpp',
-    dependencies: raylib_dep)
+    dependencies: [raylib_dep, viewer_headers_dep])
 test('streamline_pulse', streamline_pulse_test, timeout: 30)
 
 # Requires a desktop OpenGL context; run explicitly alongside flow_viewer_test.

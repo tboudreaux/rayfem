@@ -1,4 +1,4 @@
-#include "../src/app/streamline_pulse.hpp"
+#include "render/streamline_pulse.hpp"
 #include <iostream>
 #include <limits>
 #include <stdexcept>

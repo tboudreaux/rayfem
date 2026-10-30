@@ -1,4 +1,4 @@
-#include "../src/app/plot.hpp"
+#include "ui/plot.hpp"
 #include <cmath>
 #include <iostream>
 #include <limits>

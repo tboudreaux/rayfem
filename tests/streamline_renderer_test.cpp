@@ -1,4 +1,4 @@
-#include "../src/app/streamline_renderer.hpp"
+#include "render/streamline_renderer.hpp"
 #include "raymath.h"
 #include "rlgl.h"
 #include <algorithm>

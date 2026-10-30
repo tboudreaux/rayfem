@@ -19,7 +19,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 ICONS = ("large_clockwise", "small_clockwise",
          "small_counter-clockwise", "large_counter-clockwise")
-FALLBACK = ROOT / "src" / "app" / "rotation_icons_data.hpp"
+FALLBACK = ROOT / "src" / "viewer" / "generated" / "rotation_icons_data.hpp"
 DIGEST_PREFIX = "// Rotation artwork inputs SHA256: "
 PIXELS = 120
 
@@ -48,7 +48,7 @@ def verified_fallback(path, digest):
             "Rotation icon fallback is stale: assets/rotation/*.svg or the "
             "generator changed. Install rsvg-convert (librsvg), then run "
             "python3 tools/generate_rotation_icons.py and include the updated "
-            "src/app/rotation_icons_data.hpp. Reconfigure the build to use an "
+            "src/viewer/generated/rotation_icons_data.hpp. Reconfigure the build to use an "
             "installed converter automatically.")
     return content
 

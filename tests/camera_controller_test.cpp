@@ -1,4 +1,4 @@
-#include "../src/app/camera_controller.hpp"
+#include "interaction/camera_controller.hpp"
 #include <cmath>
 #include <iostream>
 #include <limits>

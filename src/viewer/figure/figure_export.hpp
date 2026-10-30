@@ -1,8 +1,8 @@
 #pragma once
 
-#include "figure_writers.hpp"
-#include "theme.hpp"
-#include "widgets.hpp"
+#include "figure/figure_writers.hpp"
+#include "ui/theme.hpp"
+#include "ui/widgets.hpp"
 #include "extras/IconsFontAwesome6.h"
 #include "imgui.h"
 #include "rlgl.h"

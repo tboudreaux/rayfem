@@ -1,7 +1,7 @@
 #pragma once
 
-#include "element_picker.hpp"
-#include "indexed_surface.hpp"
+#include "interaction/element_picker.hpp"
+#include "pipeline/indexed_surface.hpp"
 #include "libRayfem/frame/render.hpp"
 #include "libRayfem/mesh/clipping.hpp"
 #include "libRayfem/mesh/color_scale.hpp"

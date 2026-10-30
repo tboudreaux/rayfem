@@ -58,6 +58,9 @@ subdir('src')
 if build_examples
     subdir('examples')
 endif
+if get_option('glvis_experiment')
+    subdir('experiments/glvis')
+endif
 if get_option('python').enabled()
     subdir('python')
 endif

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "camera_controller.hpp"
-#include "theme.hpp"
+#include "interaction/camera_controller.hpp"
+#include "ui/theme.hpp"
 #include "extras/IconsFontAwesome6.h"
 #include "imgui.h"
 #include "libRayfem/frame/render.hpp"

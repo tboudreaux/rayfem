@@ -2,10 +2,10 @@
 
 #include "libRayfem/frame/render.hpp"
 #include "libRayfem/mesh/element_statistics.hpp"
-#include "theme.hpp"
-#include "widgets.hpp"
+#include "ui/theme.hpp"
+#include "ui/widgets.hpp"
 #include "libRayfem/mesh/converter.hpp"
-#include "mouse_modifiers.hpp"
+#include "ui/mouse_modifiers.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <chrono>

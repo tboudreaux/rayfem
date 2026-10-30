@@ -1,8 +1,8 @@
 #pragma once
 
 #include "libRayfem/frame/tracking.hpp"
-#include "plot.hpp"
-#include "widgets.hpp"
+#include "ui/plot.hpp"
+#include "ui/widgets.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <chrono>

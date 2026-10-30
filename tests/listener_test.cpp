@@ -3,7 +3,7 @@
 #include "libRayfem/frame/tracking.hpp"  // before zmq.hpp: its syslog macros clash with raylib
 #include "libRayfem/init.hpp"
 #include "libRayfem/network/client.hpp"
-#include "../src/app/listener.hpp"
+#include "pipeline/listener.hpp"
 
 #include <chrono>
 #include <functional>

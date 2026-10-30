@@ -4,12 +4,12 @@
 #include "libRayfem/mesh/field_range.hpp"
 #include "libRayfem/vector/flow.hpp"
 #include "imgui.h"
-#include "theme.hpp"
+#include "ui/theme.hpp"
 #include "raymath.h"
 #include "rlgl.h"
-#include "streamline_renderer.hpp"
-#include "frame_pipeline.hpp"
-#include "widgets.hpp"
+#include "render/streamline_renderer.hpp"
+#include "pipeline/frame_pipeline.hpp"
+#include "ui/widgets.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>

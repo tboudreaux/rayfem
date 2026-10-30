@@ -1,6 +1,6 @@
 #pragma once
 
-#include "camera_controller.hpp"
+#include "interaction/camera_controller.hpp"
 #include <array>
 
 namespace RayFEM {

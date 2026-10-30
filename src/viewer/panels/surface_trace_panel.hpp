@@ -2,11 +2,11 @@
 
 #include "libRayfem/frame/render.hpp"
 #include "libRayfem/profile/surface_trace.hpp"
-#include "frame_pipeline.hpp"
-#include "plot.hpp"
-#include "ray_placement.hpp"
-#include "surface_path.hpp"
-#include "widgets.hpp"
+#include "pipeline/frame_pipeline.hpp"
+#include "ui/plot.hpp"
+#include "interaction/ray_placement.hpp"
+#include "interaction/surface_path.hpp"
+#include "ui/widgets.hpp"
 #include "raymath.h"
 #include <algorithm>
 #include <chrono>

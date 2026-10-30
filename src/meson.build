@@ -1,9 +1,14 @@
 subdir('libRayfem')
 
+# Viewer headers are included by their path under src/viewer
+# ("ui/theme.hpp"); the tests include them the same way.
+viewer_headers_dep = declare_dependency(include_directories: include_directories('viewer'))
+app_dependencies += viewer_headers_dep
+
 viewer_install_rpath = ':'.join(serif_runtime_dirs + runtime_dirs + [get_option('prefix') / get_option('libdir')])
 if build_viewer
     rotation_generator = files('../tools/generate_rotation_icons.py')
-    rotation_fallback = files('app/rotation_icons_data.hpp')
+    rotation_fallback = files('viewer/generated/rotation_icons_data.hpp')
     rotation_assets_dir = meson.current_source_dir() / '../assets/rotation'
     rotation_sources = files(
         '../assets/rotation/large_clockwise.svg',
@@ -26,12 +31,12 @@ if build_viewer
         input: rotation_sources, output: 'rayfem_rotation_icons_generated.hpp',
         command: [python_build, rotation_generator, '--output', '@OUTPUT@'] + rotation_args,
         depend_files: [rotation_generator, rotation_fallback])
-    viewer_sources = ['app/main.cpp', rotation_artwork]
+    viewer_sources = ['viewer/main.cpp', rotation_artwork]
     viewer_objcpp_args = []
     if host_machine.system() == 'darwin'
         add_languages('objcpp', required: true)
         viewer_objcpp_args = ['-std=c++23']
-        viewer_sources += files('app/mouse_modifiers.mm')
+        viewer_sources += files('viewer/ui/mouse_modifiers.mm')
     endif
     # A bundle ships the viewer inside the Python package (rayfem/bin), linked
     # statically so it needs no libraries beyond the system's.
@@ -41,10 +46,4 @@ if build_viewer
         build_rpath: ':'.join(serif_runtime_dirs + runtime_dirs),
         install: true, install_rpath: bundle ? '' : viewer_install_rpath,
         install_dir: bundle ? python_build.get_install_dir() / 'rayfem' / 'bin' : get_option('bindir'))
-endif
-
-if get_option('glvis_experiment')
-    executable('glvisInt', 'app/demo.cpp',
-        dependencies: [dependencies, app_dependencies],
-        cpp_args: cpp_args, c_args: c_args, link_args: link_args)
 endif

@@ -1,4 +1,4 @@
-#include "../src/app/frame_pipeline.hpp"
+#include "pipeline/frame_pipeline.hpp"
 
 #include <chrono>
 #include <iostream>

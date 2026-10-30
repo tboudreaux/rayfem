@@ -1,5 +1,5 @@
 #include "libRayfem/mesh/clipping.hpp"
-#include "../src/app/element_picker.hpp"
+#include "interaction/element_picker.hpp"
 
 #include <cmath>
 #include <iostream>

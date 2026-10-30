@@ -1,4 +1,4 @@
-#include "../src/app/orientation_cube.hpp"
+#include "render/orientation_cube.hpp"
 #include <array>
 #include <cmath>
 #include <iostream>

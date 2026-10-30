@@ -1,6 +1,6 @@
 #pragma once
 
-#include "streamline_pulse.hpp"
+#include "render/streamline_pulse.hpp"
 #include "raylib.h"
 #include <cstddef>
 #include <span>

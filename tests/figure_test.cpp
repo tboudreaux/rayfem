@@ -1,4 +1,4 @@
-#include "../src/app/figure_writers.hpp"
+#include "figure/figure_writers.hpp"
 
 #include <iostream>
 #include <regex>

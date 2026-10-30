@@ -1,5 +1,5 @@
-#include "../src/app/ray_placement.hpp"
-#include "../src/app/surface_path.hpp"
+#include "interaction/ray_placement.hpp"
+#include "interaction/surface_path.hpp"
 #include <numbers>
 
 #include <cmath>

@@ -1,8 +1,8 @@
 #pragma once
 
 #include "libRayfem/frame/render.hpp"
-#include "theme.hpp"
-#include "widgets.hpp"
+#include "ui/theme.hpp"
+#include "ui/widgets.hpp"
 #include "extras/IconsFontAwesome6.h"
 #include "imgui.h"
 

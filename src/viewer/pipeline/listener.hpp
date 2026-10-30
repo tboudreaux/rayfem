@@ -13,7 +13,7 @@
 // send their mesh again after reconnecting, as they do on startup.
 
 #include "libRayfem/network/server.hpp"
-#include "theme.hpp"
+#include "ui/theme.hpp"
 #include "imgui.h"
 
 #include <algorithm>

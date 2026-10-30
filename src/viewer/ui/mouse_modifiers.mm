@@ -1,6 +1,6 @@
 #import <AppKit/AppKit.h>
 
-#include "mouse_modifiers.hpp"
+#include "ui/mouse_modifiers.hpp"
 
 namespace RayFEM::UI {
 namespace {

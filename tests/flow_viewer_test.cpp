@@ -1,4 +1,4 @@
-#include "../src/app/flow_panel.hpp"
+#include "panels/flow_panel.hpp"
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>

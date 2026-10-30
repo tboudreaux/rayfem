@@ -4,11 +4,11 @@
 #include "libRayfem/profile/sampler.hpp"
 #include "imgui.h"
 #include "raymath.h"
-#include "plot.hpp"
-#include "frame_pipeline.hpp"
-#include "ray_placement.hpp"
-#include "widgets.hpp"
-#include "theme.hpp"
+#include "ui/plot.hpp"
+#include "pipeline/frame_pipeline.hpp"
+#include "interaction/ray_placement.hpp"
+#include "ui/widgets.hpp"
+#include "ui/theme.hpp"
 #include "extras/IconsFontAwesome6.h"
 #include <algorithm>
 #include <array>
