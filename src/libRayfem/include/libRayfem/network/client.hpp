@@ -41,6 +41,8 @@ public:
     // Compatibility helper: registers fresh geometry and sends a single field.
     bool send(mfem::Mesh& mesh, mfem::GridFunction& gf, const FrameMetadata& metadata);
     const std::string& getLastError() const;
+    // Whether a viewer is connected now (see StreamClient).
+    bool connected() { return m_stream->connected(); }
     // The MFEM-free client underneath.
     StreamClient& stream() { return *m_stream; }
 private:

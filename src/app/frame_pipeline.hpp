@@ -174,8 +174,12 @@ struct SurfaceResult {
 
 class FramePipeline {
 public:
-    explicit FramePipeline(Server& server) : server_(server),
+    // fetch is called on the worker thread for newly decoded frames.
+    using Fetch = std::function<std::vector<std::shared_ptr<RenderFrame>>(size_t)>;
+    explicit FramePipeline(Fetch fetch) : fetch_(std::move(fetch)),
         worker_([this](std::stop_token stop) { Loop(stop); }) {}
+    explicit FramePipeline(Server& server)
+        : FramePipeline([&server](size_t count) { return server.fetchFrames(count); }) {}
     ~FramePipeline() { Stop(); }
     FramePipeline(const FramePipeline&) = delete;
     FramePipeline& operator=(const FramePipeline&) = delete;
@@ -285,7 +289,7 @@ private:
     }
 
     void Ingest() {
-        for (auto& frame : server_.fetchFrames(64)) {
+        for (auto& frame : fetch_(64)) {
             auto& pair = meshes_[frame->mesh.get()];
             auto viewer = pair.compute.lock() == frame->mesh ? pair.viewer.lock() : nullptr;
             if (!viewer) {
@@ -390,7 +394,7 @@ private:
         return result;
     }
 
-    Server& server_;
+    Fetch fetch_;
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::deque<Arrival> arrivals_;

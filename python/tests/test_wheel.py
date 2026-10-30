@@ -80,24 +80,40 @@ def test_mesh_text() -> None:
 
 
 def test_client_refusals() -> None:
-    # No viewer listens here: sends queue, and refusals come from validation.
-    client = rayfem.Client(port=free_port())
     _, text = square()
-    assert "MFEM mesh" in expect_error(client.send_mesh, 1, "not a mesh")
-    assert "sendMesh" in expect_error(client.send_frame, 1, [rayfem.Field("u", mesh.vertex_space(2), [0.0]*4)], index=0)
-    client.send_mesh(1, text)
     field = rayfem.Field("u", mesh.vertex_space(2), array.array("d", [0, 1, 2, 3]))
-    client.send_frame(1, [field], index=0, time=0.5)
-    assert "increase" in expect_error(client.send_frame, 1, [field], index=0)
-    assert "non-finite" in expect_error(client.send_frame, 1, [rayfem.Field("u", mesh.vertex_space(2), [0, float("nan"), 0, 0])], index=1)
-    assert "header" in expect_error(client.send_frame, 1, [rayfem.Field("u", "nonsense", [1.0])], index=1)
-    assert "schema" in expect_error(client.send_frame, 1, [field], index=1, values={"iteration": 1})
-    client.register_schema(rayfem.Schema(values=[rayfem.Value("iteration", "int", coordinate=True)], has_time=False,
-                                         primary="iteration"))
-    assert "bool" in expect_error(client.send_frame, 1, [field], index=1, values={"iteration": True})
-    assert "not in the registered schema" in expect_error(client.send_frame, 1, [field], index=1, tags=["converged"])
-    assert "coordinate" in expect_error(client.register_schema, rayfem.Schema(values=[rayfem.Value("x", "str", coordinate=True)])).lower()
-    client.send_frame(1, [field], index=1, values={"iteration": 3})
+    # No viewer listens here: sends are refused rather than queued.
+    port = free_port()
+    client = rayfem.Client(port=port)
+    assert not client.connected and client.address.endswith(f":{port}")
+    assert "MFEM mesh" in expect_error(client.send_mesh, 1, "not a mesh")
+    assert "No viewer is listening" in expect_error(client.send_mesh, 1, text)
+    assert rayfem.init(port, timeout=20) == rayfem.InitStatus.Started
+    try:
+        deadline = time.monotonic() + 10
+        while not client.connected and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert client.connected
+        assert "sendMesh" in expect_error(client.send_frame, 1, [rayfem.Field("u", mesh.vertex_space(2), [0.0]*4)], index=0)
+        client.send_mesh(1, text)
+        client.send_frame(1, [field], index=0, time=0.5)
+        assert "increase" in expect_error(client.send_frame, 1, [field], index=0)
+        assert "non-finite" in expect_error(client.send_frame, 1, [rayfem.Field("u", mesh.vertex_space(2), [0, float("nan"), 0, 0])], index=1)
+        assert "header" in expect_error(client.send_frame, 1, [rayfem.Field("u", "nonsense", [1.0])], index=1)
+        assert "schema" in expect_error(client.send_frame, 1, [field], index=1, values={"iteration": 1})
+        client.register_schema(rayfem.Schema(values=[rayfem.Value("iteration", "int", coordinate=True)], has_time=False,
+                                             primary="iteration"))
+        assert "bool" in expect_error(client.send_frame, 1, [field], index=1, values={"iteration": True})
+        assert "not in the registered schema" in expect_error(client.send_frame, 1, [field], index=1, tags=["converged"])
+        assert "coordinate" in expect_error(client.register_schema, rayfem.Schema(values=[rayfem.Value("x", "str", coordinate=True)])).lower()
+        client.send_frame(1, [field], index=1, values={"iteration": 3})
+    finally:
+        assert rayfem.shutdown(port, timeout=20)
+    # The viewer closed: the next send says so.
+    deadline = time.monotonic() + 10
+    while client.connected and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert "No viewer is listening" in expect_error(client.send_frame, 1, [field], index=2, values={"iteration": 4})
     client.close()
     assert "closed" in expect_error(client.send_mesh, 1, text)
     print("client refusals ok")

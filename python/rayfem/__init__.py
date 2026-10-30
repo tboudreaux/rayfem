@@ -162,9 +162,12 @@ def _field(item: FieldLike) -> tuple[str, str, Any]:
 class Client:
     """Sends meshes and frames to a viewer at ``host:port``.
 
-    Sends are queued for the viewer; a refused send (invalid input, or a
-    viewer that stopped receiving) raises :class:`RayFEMError`. The viewer
-    validates everything it decodes and reports problems in its window.
+    Sends are queued for the viewer; a refused send raises
+    :class:`RayFEMError`. A send is refused for invalid input, when no viewer
+    is listening at ``host:port`` (it closed, or moved to another host or
+    port from its session menu), and for a frame whose mesh the viewer no
+    longer has because its listener restarted; send the mesh again then. The
+    viewer validates everything it decodes and reports problems in its window.
     """
 
     def __init__(self, host: str = "localhost", port: int = 5555, *, binary: bool = True) -> None:
@@ -175,6 +178,16 @@ class Client:
         if self._core is None:
             raise RayFEMError("The client is closed")
         return self._core
+
+    @property
+    def connected(self) -> bool:
+        """Whether a viewer is listening at this client's address now."""
+        return self._client().connected
+
+    @property
+    def address(self) -> str:
+        """The ``host:port`` this client streams to."""
+        return self._client().address
 
     def register_schema(self, schema: Schema) -> None:
         """Declare the values and tags frames will carry; registering again replaces it."""

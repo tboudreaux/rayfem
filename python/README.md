@@ -48,7 +48,12 @@ client.send_frame(1, fields, index=n, values={"iteration": n, "residual": r},
                   tags=["converged"] if done else [])
 ```
 
-Sending is one-way; `rayfem.stats()` reports how many frames the viewer has
-decoded and rejected, to confirm a stream arrived. `rayfem.shutdown()`
+Sending is one-way, but a send raises `RayFEMError` when no viewer is
+listening at the client's address (it closed, or moved to another host or
+port from its info menu), and a frame raises when the viewer's listener
+restarted since its mesh was sent; send the mesh again then.
+`client.connected` reports whether a viewer is connected now.
+`rayfem.stats()` reports how many frames the viewer has decoded and
+rejected, to confirm a stream arrived. `rayfem.shutdown()`
 closes the viewer. Wheels are abi3 (CPython 3.12 and
 later) for macOS and Linux on x86_64 and arm64.

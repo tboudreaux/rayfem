@@ -44,6 +44,7 @@
 #include "ray_placement.hpp"
 #include "widgets.hpp"
 #include "figure_export.hpp"
+#include "listener.hpp"
 #include "frame_info.hpp"
 #include "element_picker.hpp"
 #include "element_panel.hpp"
@@ -158,12 +159,9 @@ struct RangeCache {
 
 class VisualizerApp {
 public:
-    explicit VisualizerApp(const Options& options) : opts(options), server(options.listen, options.port,
-            options.controlPort ? options.controlPort : options.port + 1) {
-        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);
-        while(!server.ready() && !server.getErrorCount() && std::chrono::steady_clock::now()<deadline)
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        if(!server.ready()) throw std::runtime_error(server.getLastError().empty()?"Timed out starting the stream listener":server.getLastError());
+    // The listener starts (or throws) before the window opens.
+    explicit VisualizerApp(const Options& options) : opts(options),
+            listener({options.listen, options.port, options.controlPort ? options.controlPort : options.port + 1}) {
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
         InitWindow(opts.width, opts.height, "RayFEM | fields in motion");
         if(!IsWindowReady()) throw std::runtime_error("Could not initialize the RayFEM window");
@@ -214,11 +212,11 @@ public:
         const auto home=RayFEM::ReferencePlaneHomeBasis(referenceRotation);
         camera = {Vector3Scale(home.back,12), {0, 0, 0}, home.up, 40, CAMERA_PERSPECTIVE};
         if (!opts.archive.empty()) LoadArchive(opts.archive);
-        server.markViewerReady();
+        listener.markViewerReady();
     }
 
     ~VisualizerApp() {
-        server.markViewerReady(false);
+        listener.markViewerReady(false);
         pipeline.Stop();
         ClearCache();
         flow.ClearGraphics();
@@ -237,7 +235,7 @@ public:
     }
 
     void Run() {
-        while (!WindowShouldClose() && !zsys_interrupted && !server.shutdownRequested()) {
+        while (!WindowShouldClose() && !zsys_interrupted && !listener.shutdownRequested()) {
             Ingest();
             HandleDroppedFiles();
             BeginDrawing();
@@ -699,14 +697,14 @@ private:
     // Connection state; clicking it pauses or resumes receiving frames.
     void DrawStatusIndicator(const std::string& label) {
         const auto& palette=RayFEM::UI::Palette();
-        const bool paused=!server.receiving();
-        const ImU32 color=paused||!server.ready()?palette.warning:palette.success;
+        const bool paused=!listener.receiving();
+        const ImU32 color=paused||!listener.ready()?palette.warning:palette.success;
         ImGui::AlignTextToFramePadding();
         const ImVec2 position=ImGui::GetCursorScreenPos();
         const float radius=ImGui::CalcTextSize(ICON_FA_CIRCLE).x*.3f;
         const float spacing=ImGui::GetStyle().ItemInnerSpacing.x;
         const ImVec2 size{radius*2+spacing+ImGui::CalcTextSize(label.c_str()).x,ImGui::GetFrameHeight()};
-        if(ImGui::InvisibleButton("##stream_status",size)) server.setReceiving(paused);
+        if(ImGui::InvisibleButton("##stream_status",size)) listener.setReceiving(paused);
         const bool hovered=ImGui::IsItemHovered();
         auto* draw=ImGui::GetWindowDrawList();
         if(hovered) draw->AddRectFilled({position.x-6,position.y},{position.x+size.x+6,position.y+size.y},RayFEM::UI::WithAlpha(palette.text,16),RayFEM::UI::ControlRounding);
@@ -717,9 +715,9 @@ private:
         } else draw->AddCircleFilled({position.x+radius,center},radius,color);
         draw->AddText({position.x+radius*2+spacing,center-ImGui::GetTextLineHeight()*.5f},color,label.c_str());
         if (hovered) {
-            if(paused) ImGui::SetTooltip("Not receiving frames; %zu skipped so far. Click to resume.",server.getSkippedFrameCount());
-            else ImGui::SetTooltip(server.ready()?"Receiving frames on %s:%d (%zu so far). Click to pause.":"Starting the stream listener on %s:%d (%zu frames).",
-                                   opts.listen.c_str(),opts.port,server.getReceivedFrameCount());
+            if(paused) ImGui::SetTooltip("Not receiving frames; %zu skipped so far. Click to resume.",listener.getSkippedFrameCount());
+            else ImGui::SetTooltip(listener.ready()?"Receiving frames on %s:%d (%zu so far). Click to pause.":"Starting the stream listener on %s:%d (%zu frames).",
+                                   listener.endpoint().host.c_str(),listener.endpoint().port,listener.getReceivedFrameCount());
         }
     }
 
@@ -731,8 +729,8 @@ private:
         const char* openLabel=ICON_FA_FOLDER_OPEN "  Open";
         const char* themeLabel=light?ICON_FA_MOON "###theme":ICON_FA_SUN "###theme";
         const char* infoLabel=ICON_FA_CIRCLE_INFO "###info";
-        const std::string statusLabel=!server.receiving()?"Paused · "+std::to_string(server.getSkippedFrameCount())+" skipped":
-            server.ready()?"Listening on :"+std::to_string(opts.port):"Starting listener";
+        const std::string statusLabel=!listener.receiving()?"Paused · "+std::to_string(listener.getSkippedFrameCount())+" skipped":
+            listener.ready()?"Listening on :"+std::to_string(listener.endpoint().port):"Not listening";
         const auto& style=ImGui::GetStyle();
         auto buttonWidth=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+style.FramePadding.x*2;};
         const float statusWidth=ImGui::CalcTextSize(ICON_FA_CIRCLE).x*.6f+style.ItemInnerSpacing.x+ImGui::CalcTextSize(statusLabel.c_str()).x;
@@ -765,22 +763,24 @@ private:
         ImGui::SameLine();
         DrawStatusIndicator(statusLabel);
         ImGui::SameLine();
-        if (ImGui::Button(infoLabel)) ImGui::OpenPopup("Session info");
+        if (ImGui::Button(infoLabel)) {ImGui::OpenPopup("Session info");listenerSettings.loaded=false;}
         Tip("Session details, statistics and mouse controls");
         if (ImGui::BeginPopup("Session info")) {
             ImGui::SeparatorText("Stream");
-            bool receiving=server.receiving();
-            if(RayFEM::UI::Switch("Receive frames",&receiving)) server.setReceiving(receiving);
+            bool receiving=listener.receiving();
+            if(RayFEM::UI::Switch("Receive frames",&receiving)) listener.setReceiving(receiving);
             if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
                 ImGui::SetTooltip("Turn off to stop taking new frames, for example to inspect the current history. Mesh registrations are still kept.");
-            if(!receiving) ImGui::TextDisabled("%zu frames skipped while paused",server.getSkippedFrameCount());
-            ImGui::Text("%s:%d",opts.listen.c_str(),opts.port);
-            ImGui::Text("%zu received / %zu queued",server.getReceivedFrameCount(),server.getPendingFrameCount());
-            ImGui::Text("%zu dropped / %zu errors",server.getDroppedFrameCount(),server.getErrorCount());
+            if(!receiving) ImGui::TextDisabled("%zu frames skipped while paused",listener.getSkippedFrameCount());
+            ImGui::Text("%zu received / %zu queued",listener.getReceivedFrameCount(),listener.getPendingFrameCount());
+            ImGui::Text("%zu dropped / %zu errors",listener.getDroppedFrameCount(),listener.getErrorCount());
             ImGui::Text("%zu retained frames / ~%.1f MiB",frames.size(),HistoryBytes()/1048576.0);
             ImGui::Text("%d fps",GetFPS());
             if (!cache.empty()) ImGui::Text("%zu triangles / %.1f ms build",cache.back().vertices/3,cache.back().build_ms);
-            if (!server.getLastError().empty()) ImGui::TextWrapped("%s",server.getLastError().c_str());
+            if (!listener.getLastError().empty()) ImGui::TextWrapped("%s",listener.getLastError().c_str());
+            ImGui::SeparatorText("Listener");
+            RayFEM::UI::DrawListenerSettings(listener,listenerSettings);
+            ImGui::Spacing();
             ImGui::Text("SERiF files: %s", RayFEM::SerifLoadingAvailable()?"available":"not enabled in this build");
             if (!archivePath.empty()) {
                 ImGui::SeparatorText("Archive");
@@ -1700,7 +1700,7 @@ private:
 
         struct Chip { std::string label; const char* tip; };
         std::vector<Chip> chips;
-        if(!server.receiving())
+        if(!listener.receiving())
             chips.push_back({ICON_FA_PAUSE "  Stream paused","New frames are skipped. Resume from the status at the top right or the Info menu."});
         if(const auto frame=Current()) {
             if(clip) chips.push_back({ICON_FA_SCISSORS "  Clipped","Clipping is on. Change it under View > Clipping."});
@@ -1800,7 +1800,7 @@ private:
             }
         };
         if(!Current()) {
-            const std::string stream="Stream frames to "+opts.listen+":"+std::to_string(opts.port);
+            const std::string stream="Stream frames to "+RayFEM::UI::ClientTarget(listener.endpoint());
             if(RayFEM::SerifLoadingAvailable())
                 centered({{ICON_FA_FOLDER_OPEN "  No data yet",palette.text},
                           {"Open a .serif archive (Ctrl/Cmd+O) or drop one here,",palette.muted},
@@ -1951,8 +1951,9 @@ private:
     }
 
     Options opts;
-    RayFEM::Server server;
-    RayFEM::UI::FramePipeline pipeline{server};
+    RayFEM::UI::Listener listener;
+    RayFEM::UI::ListenerSettings listenerSettings;
+    RayFEM::UI::FramePipeline pipeline{[this](size_t count) { return listener.fetchFrames(count); }};
     ArchiveFileDialog fileDialog;
     std::string archivePath, archiveError;
     std::vector<std::string> archiveWarnings;

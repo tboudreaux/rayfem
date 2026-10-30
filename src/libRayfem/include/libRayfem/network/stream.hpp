@@ -25,6 +25,13 @@ struct FieldData {
 // use; Client (client.hpp) serializes MFEM objects and sends through it.
 // The viewer validates everything it decodes; this checks what it can
 // without MFEM. One StreamClient must be used from one thread.
+//
+// Streaming is one-way, but the client watches its connection: a send is
+// refused when no viewer is connected (after waiting up to a second for one),
+// and a frame is refused when the viewer's listener has restarted since its
+// mesh was sent (as when the viewer changes its host or port and comes back
+// on this one), since that listener no longer has the mesh. A packet sent in
+// the moment the viewer moves can still be lost; the next send reports it.
 class StreamClient {
 public:
     StreamClient(const std::string& host, size_t port);
@@ -46,10 +53,14 @@ public:
     void setBinaryFields(bool binary) { m_binaryFields = binary; }
     bool binaryFields() const { return m_binaryFields; }
     const std::string& getLastError() const { return m_lastError; }
+    // Whether a viewer is connected now; "host:port" it streams to.
+    bool connected();
+    const std::string& address() const;
     bool fail(std::string message);
 
 private:
-    struct Registration { uint64_t revision = 0; uint32_t last_frame = 0; bool has_frame = false; };
+    struct Registration { uint64_t revision = 0; uint32_t last_frame = 0; bool has_frame = false; uint64_t epoch = 0; };
+    bool reachable();
     bool sendPacket(Protocol::Header header, const std::string& payload);
     bool sendSchema();
     struct Socket;

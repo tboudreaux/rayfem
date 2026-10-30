@@ -114,6 +114,8 @@ NB_MODULE(_rayfem, m) {
         .def(nb::init<const std::string&, size_t>(), "host"_a = "localhost", "port"_a = 5555)
         .def_prop_rw("binary_fields", &RayFEM::StreamClient::binaryFields, &RayFEM::StreamClient::setBinaryFields)
         .def_prop_ro("last_error", &RayFEM::StreamClient::getLastError)
+        .def_prop_ro("connected", &RayFEM::StreamClient::connected)
+        .def_prop_ro("address", &RayFEM::StreamClient::address)
         .def("register_schema", [](RayFEM::StreamClient& client,
                                    const std::vector<std::tuple<std::string, std::string, bool, std::string, std::string>>& values,
                                    const std::vector<std::pair<std::string, std::string>>& tags, bool has_time,
