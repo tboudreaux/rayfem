@@ -20,8 +20,9 @@ Start the viewer, then start a producer in another terminal:
 ./build-rayfem/examples/exampleClient --geometry quad --order 4 --frames 300 --fps 30
 ```
 
-From Python, `pip install rayfem` installs a wheel that includes the viewer;
-see [docs/python.md](docs/python.md).
+From Python, `pip install rayfem` installs a wheel that includes the viewer
+and a `rayfem` command that runs it (it prints the ports it chose; Ctrl-C
+closes it); see [docs/python.md](docs/python.md).
 
 ## Documentation
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import array
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -119,6 +120,22 @@ def test_client_refusals() -> None:
     print("client refusals ok")
 
 
+def test_signals() -> None:
+    # The client side must leave Ctrl-C to Python: CZMQ would otherwise
+    # replace the SIGINT handler when the first socket is created.
+    client = rayfem.Client(port=free_port())
+    expect_error(rayfem.stats, free_port(), timeout=0.2)
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    try:
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(1)
+        raise AssertionError("SIGINT did not raise KeyboardInterrupt after using the client")
+    except KeyboardInterrupt:
+        pass
+    client.close()
+    print("Ctrl-C still reaches Python")
+
+
 def test_probe(probe: str) -> None:
     """Frames sent from Python arrive at the C++ server decoded exactly."""
     port = free_port()
@@ -187,6 +204,7 @@ if __name__ == "__main__":
     test_package()
     test_mesh_text()
     test_client_refusals()
+    test_signals()
     if os.environ.get("RAYFEM_STREAM_PROBE"):
         test_probe(os.environ["RAYFEM_STREAM_PROBE"])
     if os.environ.get("RAYFEM_TEST_VIEWER") == "1":

@@ -18,6 +18,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
+[project.scripts]
+rayfem = "rayfem.cli:main"
+
 [project.optional-dependencies]
 numpy = ["numpy"]
 test = ["numpy"]
@@ -49,7 +52,7 @@ build = "cp312-*"
 skip = ["*-musllinux_*", "*-win*"]
 build-frontend = "build"
 test-requires = ["numpy"]
-test-command = "python {project}/python/tests/test_wheel.py"
+test-command = "python {project}/python/tests/test_wheel.py && python {project}/python/tests/test_cli.py"
 
 [tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux_2_28"

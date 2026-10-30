@@ -2,6 +2,7 @@
 
 #include "czmq.h"
 #include <memory>
+#include <mutex>
 
 namespace RayFEM {
     template <typename T, void (*Destroyer)(T**)>
@@ -36,6 +37,17 @@ namespace RayFEM {
     private:
         T* ptr_ = nullptr;
     };
+
+    // RayFEM's client side (init, stats, shutdown and StreamClient) runs
+    // inside other programs, so it must not take over their Ctrl-C. CZMQ
+    // installs SIGINT and SIGTERM handlers that only set zsys_interrupted
+    // when its first socket is created; this keeps (or restores) the
+    // program's own. The viewer's Server does not call it: its main loop
+    // watches zsys_interrupted.
+    inline void KeepHostSignals() {
+        static std::once_flag once;
+        std::call_once(once, [] { zsys_handler_set(nullptr); });
+    }
 
     using SocketPtr = ZmqPtr<zsock_t, zsock_destroy>;
     using MsgPtr    = ZmqPtr<zmsg_t, zmsg_destroy>;

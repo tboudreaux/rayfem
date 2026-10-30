@@ -52,6 +52,8 @@ std::string encodeText(const FieldData& field) {
 // host on the same port) starts a new epoch whose listener has none of the
 // meshes sent before it.
 struct StreamClient::Socket {
+    // The first member: the host's signal handlers are kept before CZMQ starts.
+    bool keep_signals = (KeepHostSignals(), true);
     SocketPtr value{zsock_new(ZMQ_PUSH)};
     SocketPtr monitor;
     std::string address;

@@ -202,6 +202,7 @@ std::shared_ptr<Child> Launch(const std::string& executable,const WindowParams& 
 } // namespace
 
 InitResult init(const WindowParams& parameters) {
+    KeepHostSignals();
     const std::lock_guard lock(LifecycleMutex());
     InitResult result;
     try {
@@ -275,6 +276,7 @@ InitResult init(const WindowParams& parameters) {
 }
 
 ShutdownResult shutdown(const WindowParams& parameters) {
+    KeepHostSignals();
     const std::lock_guard lock(LifecycleMutex());
     ShutdownResult result;
     try {
@@ -364,6 +366,7 @@ ShutdownResult shutdown(const WindowParams& parameters) {
     return result;
 }
 ViewerStats stats(const WindowParams& parameters) {
+    KeepHostSignals();
     ViewerStats result;
     if (parameters.port < 1 || parameters.port > 65535) { result.error = "Invalid viewer port."; return result; }
     const int control_port = parameters.control_port ? parameters.control_port : parameters.port + 1;

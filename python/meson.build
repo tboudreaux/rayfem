@@ -27,6 +27,6 @@ python_build.extension_module('_rayfem', 'module.cpp',
     subdir: 'rayfem')
 
 python_build.install_sources(
-    'rayfem/__init__.py', 'rayfem/_viewer.py', 'rayfem/mesh.py', 'rayfem/py.typed',
+    'rayfem/__init__.py', 'rayfem/__main__.py', 'rayfem/_viewer.py', 'rayfem/cli.py', 'rayfem/mesh.py', 'rayfem/py.typed',
     'rayfem/adapters/__init__.py', 'rayfem/adapters/pymfem.py',
     preserve_path: true)

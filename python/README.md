@@ -20,6 +20,23 @@ with rayfem.Client() as client:
         client.send_frame(1, [rayfem.Field("u", mesh.vertex_space(2), u)], index=step, time=0.1*step)
 ```
 
+## The `rayfem` command
+
+Installing the wheel also installs a `rayfem` command (or `python -m rayfem`)
+that runs the viewer in the foreground:
+
+```sh
+rayfem                          # the first free port pair from 5555, on 127.0.0.1
+rayfem --port 6000              # stream port 6000, control port 6001
+rayfem --host 0.0.0.0           # every interface, without authentication
+rayfem --light run.serif        # light mode, opening an archive
+```
+
+It prints the address to stream to and waits. Ctrl-C (or SIGTERM, or closing
+the terminal) closes the viewer normally; a second Ctrl-C, or a viewer that
+has not closed after ten seconds, ends it. `rayfem --help` lists the window
+options; `--verbose` shows the viewer's graphics log.
+
 ## Data model
 
 The Python API shares no C++ types with other packages, so it works beside
@@ -54,6 +71,7 @@ port from its info menu), and a frame raises when the viewer's listener
 restarted since its mesh was sent; send the mesh again then.
 `client.connected` reports whether a viewer is connected now.
 `rayfem.stats()` reports how many frames the viewer has decoded and
-rejected, to confirm a stream arrived. `rayfem.shutdown()`
+rejected, to confirm a stream arrived. Using the client leaves Ctrl-C to
+your program: RayFEM keeps the process's own SIGINT and SIGTERM handlers. `rayfem.shutdown()`
 closes the viewer. Wheels are abi3 (CPython 3.12 and
 later) for macOS and Linux on x86_64 and arm64.

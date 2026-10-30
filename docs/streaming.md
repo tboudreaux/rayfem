@@ -2,7 +2,7 @@
 
 ## Start a viewer from C++
 
-Call `RayFEM::init` before creating a streaming client. It returns once a compatible viewer reports that its network listeners and window are ready, or when startup fails or times out.
+Call `RayFEM::init` before creating a streaming client. The client side never takes over the program's Ctrl-C: CZMQ would install its own SIGINT and SIGTERM handlers with its first socket, and RayFEM keeps (or restores) the program's instead. It returns once a compatible viewer reports that its network listeners and window are ready, or when startup fails or times out.
 
 ```cpp
 #include "libRayfem/init.hpp"
