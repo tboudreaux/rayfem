@@ -248,6 +248,24 @@ inline void PrepareCameraOrbitGesture(CameraInputSnapshot& input, CameraDragStat
     }
 }
 
+// Rotate the camera about its target as dragging by delta pixels does: the
+// scene follows the pointer. This rotates the current screen frame rather
+// than rebuilding yaw/pitch against world Y, which keeps a snapped pole or a
+// partly completed view transition continuous when the user takes over.
+inline void OrbitCamera(Camera3D& camera, Vector2 delta, float radians_per_pixel) {
+    const float distance = Vector3Distance(camera.position, camera.target);
+    if (!std::isfinite(distance) || distance < 1e-12f) return;
+    auto basis = CameraBasis(camera);
+    const Quaternion yaw = QuaternionFromAxisAngle(basis.up, -delta.x * radians_per_pixel);
+    basis.back = Vector3RotateByQuaternion(basis.back, yaw);
+    basis.right = Vector3RotateByQuaternion(basis.right, yaw);
+    const Quaternion pitch = QuaternionFromAxisAngle(basis.right, -delta.y * radians_per_pixel);
+    basis.back = Vector3Normalize(Vector3RotateByQuaternion(basis.back, pitch));
+    basis.up = Vector3Normalize(Vector3RotateByQuaternion(basis.up, pitch));
+    camera.position = Vector3Add(camera.target, Vector3Scale(basis.back, distance));
+    camera.up = basis.up;
+}
+
 inline bool CameraViewportContains(Vector2 mouse, Rectangle viewport) {
     return mouse.x >= viewport.x && mouse.x < viewport.x + viewport.width &&
            mouse.y >= viewport.y && mouse.y < viewport.y + viewport.height;
@@ -303,19 +321,7 @@ inline bool UpdateCameraController(Camera3D& camera, CameraDragState& drag,
     }
     if (drag.orbiting && (delta.x != 0 || delta.y != 0)) {
         ensure_direction();
-        // Rotate the current screen frame rather than rebuilding yaw/pitch
-        // against world Y. This keeps a snapped pole or a partly completed
-        // view transition continuous when the user takes over.
-        auto basis = CameraBasis(camera);
-        const Quaternion yaw = QuaternionFromAxisAngle(basis.up, -delta.x * 0.005f);
-        basis.back = Vector3RotateByQuaternion(basis.back, yaw);
-        basis.right = Vector3RotateByQuaternion(basis.right, yaw);
-        const Quaternion pitch = QuaternionFromAxisAngle(basis.right, -delta.y * 0.005f);
-        basis.back = Vector3Normalize(Vector3RotateByQuaternion(basis.back, pitch));
-        basis.up = Vector3Normalize(Vector3RotateByQuaternion(basis.up, pitch));
-        offset = Vector3Scale(basis.back, distance);
-        camera.position = Vector3Add(camera.target, offset);
-        camera.up = basis.up;
+        OrbitCamera(camera, delta, 0.005f);
         changed = true;
     }
     if (drag.panning && (delta.x != 0 || delta.y != 0)) {

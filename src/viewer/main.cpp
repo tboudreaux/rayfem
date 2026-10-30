@@ -35,6 +35,8 @@
 #include "interaction/camera_controller.hpp"
 #include "render/orientation_cube.hpp"
 #include "render/reference_plane.hpp"
+#include "render/model_axes.hpp"
+#include "interaction/spin.hpp"
 #include "render/rotation_icons.hpp"
 #include "panels/tracking_panel.hpp"
 #include "panels/surface_trace_panel.hpp"
@@ -44,6 +46,7 @@
 #include "interaction/ray_placement.hpp"
 #include "ui/widgets.hpp"
 #include "figure/figure_export.hpp"
+#include "figure/movie_export.hpp"
 #include "pipeline/listener.hpp"
 #include "panels/frame_info.hpp"
 #include "interaction/element_picker.hpp"
@@ -222,6 +225,7 @@ public:
         flow.ClearGraphics();
         streamlineRenderer.Shutdown();
         figureExporter.Shutdown();
+        if (movieTarget.id) UnloadRenderTexture(movieTarget);
         edgeRenderer.Shutdown();
         dofRenderer.Shutdown();
         rayPlacement.Shutdown();
@@ -367,7 +371,11 @@ private:
         while (frames.size() > static_cast<size_t>(opts.history) || (frames.size()>1 && HistoryBytes()>256ULL*1024*1024)) {
             // A frame viewed while not following stays put: evict the next
             // oldest instead, so a paused view does not advance on its own.
-            const std::size_t victim = !follow && selected == 0 && frames.size() > 1 ? 1 : 0;
+            // Frames a movie export is writing stay until it ends.
+            std::size_t victim = !follow && selected == 0 && frames.size() > 1 ? 1 : 0;
+            while (victim < frames.size() && std::find(movieFrames.begin(), movieFrames.end(), frames[victim]) != movieFrames.end())
+                ++victim;
+            if (victim >= frames.size() || (!follow && static_cast<int>(victim) == selected && victim + 1 >= frames.size())) break;
             const auto evicted = frames[victim];
             for (auto it=cache.begin(); it!=cache.end();) {
                 // The surface on screen (the newest entry) stays until a
@@ -646,12 +654,25 @@ private:
         surfaceBuilding=true;
         return cache.empty() ? nullptr : &cache.back();
     }
+    // The axes the shown frame's client reported for its model, if any.
+    const std::vector<RayFEM::ModelAxis>* ModelAxes() const {
+        const auto frame=Current();
+        return frame && frame->schema && !frame->schema->axes.empty()?&frame->schema->axes:nullptr;
+    }
+    // Home: the first model axis up when the client reported one and the
+    // view follows it; otherwise above the reference plane.
+    RayFEM::CameraViewBasis HomeBasis() const {
+        if(const auto* axes=ModelAxes();axes && orientByModelAxis)
+            return RayFEM::ModelAxisHomeBasis(RayFEM::ModelAxisDirection(axes->front()));
+        return RayFEM::ReferencePlaneHomeBasis(referenceRotation);
+    }
+
     void FitCamera(BoundingBox box,bool initializePlane=false) {
         cameraTransition.active=false;
         cameraDrag={};
         camera.target=Vector3Scale(Vector3Add(box.min,box.max),0.5f);
         radius=std::max(0.05f,Vector3Length(Vector3Subtract(box.max,box.min))*0.5f);
-        const auto basis=RayFEM::ReferencePlaneHomeBasis(referenceRotation);
+        const auto basis=HomeBasis();
         camera.position=Vector3Add(camera.target,Vector3Scale(basis.back,radius*3.4f));
         camera.up=basis.up;
         if (initializePlane) slicePoint=camera.target;
@@ -659,7 +680,7 @@ private:
 
     void HomeCamera() {
         cameraDrag={};
-        if(RayFEM::BeginCameraHomeTransition(cameraTransition,camera,referenceRotation,GetTime()))
+        if(RayFEM::BeginCameraBasisTransition(cameraTransition,camera,HomeBasis(),GetTime()))
             cameraAdjusted=true;
     }
 
@@ -813,6 +834,7 @@ private:
             figureExporter.Open(FigureScene());
         DrawArchiveDialogs();
         figureExporter.Draw(FigureScene());
+        movieExporter.Draw(MovieHost());
         ImGui::Spacing();
         auto frame=Current();auto* gf=Field(frame);
         elements.Context(frame);
@@ -891,6 +913,14 @@ private:
         };
         if(ImGui::Button(ICON_FA_EXPAND "  Fit")) {cameraAdjusted=false;if(auto* active=ActiveView();active && active->vertices) FitCamera(active->bounds);}
         Tip("Fit mesh in view (R)");
+        if(action(ICON_FA_ARROWS_SPIN "  Spin",spin.active,
+                  "Keep the view turning (S). Releasing a drag while it moves also starts a spin; a click in the view stops it. "
+                  "Only the view turns, not the data."))
+            spin.active=!spin.active;
+        ImGui::SameLine(0,2);
+        if(ImGui::Button(ICON_FA_CARET_DOWN "##spin_options"))ImGui::OpenPopup("Spin options");
+        Tip("Spin axis and rate");
+        if(ImGui::BeginPopup("Spin options")) {SpinControls();ImGui::EndPopup();}
         if(action(pickingDof?ICON_FA_XMARK "  Cancel pick###pick":ICON_FA_CROSSHAIRS "  Pick DOF###pick",pickingDof,
                   pickingDof?"Stop picking (Esc)":"Pick a degree of freedom in the mesh to track its coefficient over time.",true)) {
             pickingDof=!pickingDof;if(pickingDof) showDofs=true;
@@ -909,6 +939,9 @@ private:
             showPlots=!showPlots;
         if(action(ICON_FA_IMAGE "  Export",false,"Export the 3D view as a PNG or PDF figure, with axes and a colorbar (Cmd/Ctrl+E).",true))
             figureExporter.Open(FigureScene());
+        if(action(ICON_FA_FILM "  Movie",movieExporter.IsOpen() || movieExporter.Exporting(),
+                  "Export the frames the timeline shows as an H.264 movie, with camera keyframes and optional spin."))
+            movieExporter.Open(MovieHost());
         const float available=ImGui::GetContentRegionAvail().y;
         const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || tracking.HasTracks() || plotTab==1);
         float plotHeight=0;
@@ -1075,6 +1108,61 @@ private:
         }
     }
 
+    // The line the view spins about: through the camera target, or along a
+    // model axis through its own origin.
+    std::pair<Vector3,Vector3> SpinLine(const Camera3D& view) const {
+        const auto basis=RayFEM::CameraBasis(view);
+        switch(spin.axis) {
+        case SpinScreenUp: return {basis.up,view.target};
+        case SpinScreenRight: return {basis.right,view.target};
+        case SpinWorldX: return {{1,0,0},view.target};
+        case SpinWorldY: return {{0,1,0},view.target};
+        case SpinWorldZ: return {{0,0,1},view.target};
+        case SpinThrown: return {spin.thrown,view.target};
+        default:
+            if(const auto* axes=ModelAxes();axes && spin.axis-SpinModel<static_cast<int>(axes->size())) {
+                const auto& axis=(*axes)[spin.axis-SpinModel];
+                return {RayFEM::ModelAxisDirection(axis),RayFEM::ModelAxisOrigin(axis)};
+            }
+            return {basis.up,view.target};
+        }
+    }
+
+    void SpinControls() {
+        std::vector<std::string> names={"Screen vertical (turntable)","Screen horizontal","World X","World Y","World Z","Last throw"};
+        if(const auto* axes=ModelAxes())for(const auto& axis:*axes)names.push_back("Model: "+axis.name);
+        if(spin.axis<0 || spin.axis>=static_cast<int>(names.size()))spin.axis=SpinScreenUp;
+        RayFEM::UI::Switch("Spinning",&spin.active);
+        RayFEM::UI::FieldLabel("Axis");
+        ImGui::SetNextItemWidth(220);
+        if(ImGui::BeginCombo("##spin_axis",names[spin.axis].c_str())) {
+            for(int i=0;i<static_cast<int>(names.size());++i)
+                if(ImGui::Selectable(names[i].c_str(),i==spin.axis))spin.axis=i;
+            ImGui::EndCombo();
+        }
+        Tip("Screen axes turn about the view's center; model axes are the ones the client reported, through the model's own axis line.");
+        RayFEM::UI::FieldLabel("Rate");
+        ImGui::SetNextItemWidth(160);
+        ImGui::DragFloat("##spin_rate",&spin.rate,1,-720,720,"%.0f°/s",ImGuiSliderFlags_AlwaysClamp);
+        Tip("Degrees per second; negative turns the other way. Drag, or double-click to type.");
+        ImGui::SameLine();
+        if(ImGui::Button("Reverse"))spin.rate=-spin.rate;
+        RayFEM::UI::Switch("Throw to spin",&spin.throwing);
+        Tip("Releasing a drag while the pointer still moves keeps the view turning that way and at that speed, as in GLVis.");
+    }
+
+    // The client's model axes: drawn, and orienting Home and Fit.
+    void ModelAxesControl() {
+        const auto* axes=ModelAxes();
+        if(!axes)return;
+        RayFEM::UI::Switch("Model axes",&showModelAxes);
+        std::string names;
+        for(const auto& axis:*axes)names+=(names.empty()?"":", ")+axis.name;
+        Tip(("Axes the client reported for its model: "+names+". Drawn through the model, past its surface.").c_str());
+        if(RayFEM::UI::Switch(("Orient by "+axes->front().name+" axis").c_str(),&orientByModelAxis))HomeCamera();
+        Tip("Home and Fit put this axis up the screen, looking from 20° above the model's equator. Off, they look down at the reference plane.");
+    }
+
     void DrawControls() {
         auto frame=Current();auto* gf=Field(frame);
         if(!frame) {
@@ -1228,6 +1316,7 @@ private:
             ImGui::SliderFloat("##element_explosion",&elementExplosion,0,.95f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
             Tip("Open gaps by shrinking each displayed element around its center. Zero restores the mesh. Field values and analysis use the original domain.");
             ReferencePlaneControl();
+            ModelAxesControl();
             if(ImGui::TreeNode("Detail")) {
                 RayFEM::UI::Switch("Automatic detail",&automaticDetail);
                 Tip("Choose surface detail from the mesh and displacement orders.");
@@ -1466,6 +1555,7 @@ private:
                       clip && clipMode==0?&flowPlane:nullptr);
             if (showDofs) DrawDofMarkers(*active,lineViewport);
         }
+        if (active && active->vertices && showModelAxes) DrawModelAxes(active->bounds);
         if (layers.guides) {
             if (planeGuide) DrawPlaneGuide();
             profiles.DrawGuide();
@@ -1475,6 +1565,146 @@ private:
         EndMode3D();
         rlSetClipPlanes(savedNear,savedFar);
         EndTextureMode();
+    }
+
+    // Each model axis as a rod with an arrowhead at its positive end. The
+    // model hides the parts inside it, so the poles stand out of the surface.
+    void DrawModelAxes(BoundingBox bounds) {
+        const auto* axes=ModelAxes();
+        if(!axes)return;
+        rlDrawRenderBatchActive();
+        const float extent=std::max(1e-6f,Vector3Length(Vector3Subtract(bounds.max,bounds.min))*.5f);
+        const float thickness=extent*.008f;
+        for(size_t i=0;i<axes->size();++i) {
+            const auto [from,to]=RayFEM::ModelAxisSegment((*axes)[i],bounds);
+            const Vector3 d=RayFEM::ModelAxisDirection((*axes)[i]);
+            const ImU32 c=i==0?RayFEM::UI::Palette().accent:RayFEM::UI::ThemeSeriesColor(i+1);
+            const Color color{static_cast<unsigned char>(c&0xff),static_cast<unsigned char>((c>>8)&0xff),static_cast<unsigned char>((c>>16)&0xff),255};
+            DrawCylinderEx(from,to,thickness,thickness,10,color);
+            DrawCylinderEx(to,Vector3Add(to,Vector3Scale(d,extent*.08f)),thickness*3,0,14,color);
+        }
+        rlDrawRenderBatchActive();
+    }
+    // Axis names beside their arrowheads, in viewport coordinates.
+    void DrawModelAxisLabels(const ViewCache* active,ImVec2 origin,ImVec2 size) {
+        const auto* axes=ModelAxes();
+        if(!axes || !active || !active->vertices || !showModelAxes)return;
+        auto* draw=ImGui::GetWindowDrawList();
+        const float extent=std::max(1e-6f,Vector3Length(Vector3Subtract(active->bounds.max,active->bounds.min))*.5f);
+        const Vector3 forward=Vector3Normalize(Vector3Subtract(camera.target,camera.position));
+        const float margin=ImGui::GetTextLineHeight();
+        for(size_t i=0;i<axes->size();++i) {
+            // At the arrowhead, or where the axis leaves the view when the
+            // arrowhead is outside it.
+            const auto [from,to]=RayFEM::ModelAxisSegment((*axes)[i],active->bounds);
+            const Vector3 tip=Vector3Add(to,Vector3Scale(RayFEM::ModelAxisDirection((*axes)[i]),extent*.1f));
+            for(int step=0;step<=24;++step) {
+                const Vector3 point=Vector3Lerp(tip,from,step/24.0f);
+                if(Vector3DotProduct(Vector3Subtract(point,camera.position),forward)<=0)continue;
+                const Vector2 p=GetWorldToScreenEx(point,camera,int(size.x),int(size.y));
+                if(p.x<margin || p.y<margin || p.x>size.x-margin*4 || p.y>size.y-margin)continue;
+                const ImU32 c=i==0?RayFEM::UI::Palette().accent:RayFEM::UI::ThemeSeriesColor(i+1);
+                draw->AddText({origin.x+p.x+8,origin.y+p.y-margin*.5f},c,(*axes)[i].name.c_str());
+                break;
+            }
+        }
+    }
+
+    // The viewer as the Movie window sees it. Positions count the frames the
+    // timeline shows; an export captures its frames so streaming cannot
+    // evict or reorder them.
+    RayFEM::UI::Movie::Host MovieHost() {
+        RayFEM::UI::Movie::Host host;
+        host.frames=[this]{return static_cast<int>(Shown().size());};
+        host.current=[this]{
+            const auto shown=Shown();
+            const auto at=std::lower_bound(shown.begin(),shown.end(),selected);
+            return at==shown.end()?std::max(0,static_cast<int>(shown.size())-1):static_cast<int>(at-shown.begin());
+        };
+        host.label=[this](int position) {
+            const auto shown=Shown();
+            return position>=0 && position<static_cast<int>(shown.size())?RayFEM::UI::FrameCaption(*frames[shown[position]]):std::string();
+        };
+        host.camera=[this]{return camera;};
+        host.viewport=[this]{return Vector2{std::max(16.f,viewportSize.x),std::max(16.f,viewportSize.y)};};
+        host.show=[this](int position,const Camera3D& view) {
+            if(position>=0) {
+                const auto shown=Shown();
+                if(position<static_cast<int>(shown.size()))selected=shown[position];
+                follow=false;playing=false;
+            }
+            cameraTransition.active=false;spin.active=false;
+            camera=view;cameraAdjusted=true;
+        };
+        host.capture=[this](int first,int last) {
+            const auto shown=Shown();
+            movieFrames.clear();
+            for(int i=std::max(0,first);i<=last && i<static_cast<int>(shown.size());++i)movieFrames.push_back(frames[shown[i]]);
+            return static_cast<int>(movieFrames.size());
+        };
+        host.ready=[this](int index) {
+            if(index<0 || index>=static_cast<int>(movieFrames.size()))return false;
+            const auto it=std::find(frames.begin(),frames.end(),movieFrames[index]);
+            if(it==frames.end())return false;
+            selected=static_cast<int>(it-frames.begin());follow=false;playing=false;
+            const auto* view=ActiveView();
+            return view && view->frame==frames[selected] && view->vertices && !surfaceBuilding;
+        };
+        host.render=[this](const Camera3D& view,int width,int height,int supersample,std::vector<unsigned char>& rgba) {
+            return RenderMovieFrame(view,width,height,supersample,rgba);
+        };
+        host.spin=[this](Camera3D& view,double seconds) {
+            const auto [direction,point]=SpinLine(view);
+            RayFEM::SpinCamera(view,direction,point,static_cast<float>(spin.rate*DEG2RAD*seconds));
+        };
+        host.release=[this]{movieFrames.clear();};
+        return host;
+    }
+
+    // The surface on screen through view, as top-down RGBA rows. Lines keep
+    // the thickness they have on screen relative to the picture.
+    bool RenderMovieFrame(const Camera3D& view,int width,int height,int supersample,std::vector<unsigned char>& rgba) {
+        ViewCache* shown=cache.empty()?nullptr:&cache.back();
+        if(!shown || !shown->vertices)return false;
+        const int w=width*supersample,h=height*supersample;
+        if(!movieTarget.id || movieTarget.texture.width!=w || movieTarget.texture.height!=h) {
+            if(movieTarget.id)UnloadRenderTexture(movieTarget);
+            movieTarget=LoadRenderTexture(w,h);
+            if(!movieTarget.id)return false;
+        }
+        const Camera3D saved=camera;
+        camera=view;
+        const float screen=std::max(1.f,viewportSize.x);
+        RenderScene(movieTarget,shown,RayFEM::UI::Palette().viewport_background,{screen,h*screen/w},
+                    {.reference=true,.selection=false,.guides=false});
+        camera=saved;
+        Image image=LoadImageFromTexture(movieTarget.texture);
+        ImageFlipVertical(&image);
+        if(supersample>1)ImageResize(&image,width,height);
+        ImageFormat(&image,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+        const auto* data=static_cast<const unsigned char*>(image.data);
+        rgba.assign(data,data+static_cast<size_t>(width)*height*4);
+        UnloadImage(image);
+        return true;
+    }
+
+    // An orbit drag (in the view or on the cube) released while the pointer
+    // still moves keeps the scene turning that way at that speed.
+    void UpdateThrow(Vector2 mouse) {
+        const bool cube=cubePointer.dragging,orbiting=cameraDrag.orbiting || cube;
+        if(orbiting) {dragVelocity.Add(GetTime(),mouse);throwByCube=cube;}
+        else if(orbitDragging) {
+            const Vector2 velocity=dragVelocity.Release(GetTime());
+            if(spin.throwing && Vector2Length(velocity)>150) {
+                const Vector3 turn=RayFEM::ThrownSpin(camera,velocity,throwByCube?RayFEM::UI::OrientationCubeOrbitRate:.005f);
+                spin.thrown=Vector3Normalize(turn);
+                spin.rate=std::min(720.0f,Vector3Length(turn)*RAD2DEG);
+                spin.axis=SpinThrown;
+                spin.active=true;
+            }
+            dragVelocity.Reset();
+        }
+        orbitDragging=orbiting;
     }
 
     void DrawViewport(ImVec2 size) {
@@ -1499,9 +1729,18 @@ private:
                 ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel)};
         const auto orientation=RayFEM::UI::OrientationControlsBounds({origin.x,origin.y,size.x,size.y});
         const bool existingDrag=cameraDrag.orbiting || cameraDrag.panning || profiles.Dragging() || elementPress;
+        // A press anywhere in the viewport stops a spin, as in GLVis.
+        if(hovered && (input.left_pressed || input.middle_pressed))spin.active=false;
         const auto cubeInput=RayFEM::UI::UpdateOrientationControlsInput(cubePointer,input,camera,orientation,existingDrag);
         if(cubeInput.selected && RayFEM::BeginCameraViewTransition(cameraTransition,camera,cubeInput.selected->direction,GetTime()))
             cameraAdjusted=true;
+        if(cubeInput.dragging) {
+            cameraTransition.active=false;
+            if(cubeInput.orbit.x!=0 || cubeInput.orbit.y!=0) {
+                RayFEM::OrbitCamera(camera,cubeInput.orbit,RayFEM::UI::OrientationCubeOrbitRate);
+                cameraAdjusted=true;
+            }
+        }
         if(cubeInput.home)HomeCamera();
         if(cubeInput.rotation_button>=0) {
             const auto& rotation=RayFEM::UI::CameraRotationButtons[cubeInput.rotation_button];
@@ -1539,6 +1778,7 @@ private:
         input.cancel_drag|=cubeInput.owns_pointer || profileDrag || (pickingDof && meshHovered && input.left_down);
         if(elementPress)RayFEM::PrepareCameraOrbitGesture(input,cameraDrag,elementPressPosition,elementPressMoved);
         if(RayFEM::UpdateCameraController(camera,cameraDrag,input,radius))cameraAdjusted=true;
+        UpdateThrow(mouse);
         if (hovered && !ImGui::IsAnyItemActive()) {
             if (IsKeyPressed(KEY_LEFT)) {selected=StepShown(-1,false);follow=false;playing=false;}
             if (IsKeyPressed(KEY_RIGHT)) {selected=StepShown(1,false);follow=false;playing=false;}
@@ -1572,6 +1812,14 @@ private:
         if(pickingDof && !ImGui::IsAnyItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape,false) &&
            !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))pickingDof=false;
         if(RayFEM::UpdateCameraViewTransition(camera,cameraTransition,GetTime()))cameraAdjusted=true;
+        if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_S))spin.active=!spin.active;
+        // A camera transition (Fit, Home, the cube) ends a spin.
+        if(cameraTransition.active)spin.active=false;
+        if(spin.active) {
+            const auto [direction,point]=SpinLine(camera);
+            RayFEM::SpinCamera(camera,direction,point,spin.rate*DEG2RAD*std::min(GetFrameTime(),.1f));
+            cameraAdjusted=true;
+        }
         RenderScene(target,active,RayFEM::UI::Palette().viewport_background,{float(width),float(height)},{});
         // Allocate the same viewport item used for camera/handle hit testing,
         // then round only the displayed texture's outer corners.
@@ -1678,8 +1926,9 @@ private:
             }
             if(coloring==2) draw->AddText({origin.x+16,y+3},RayFEM::UI::Palette().muted,"0: interior / cut");
         }
+        DrawModelAxisLabels(active,origin,size);
         DrawViewportMessages(active,origin,size,orientation);
-        RayFEM::UI::DrawOrientationCube(camera,orientation.cube,mouse,hovered && !existingDrag);
+        RayFEM::UI::DrawOrientationCube(camera,orientation.cube,mouse,hovered && !existingDrag,cubePointer.dragging);
         RayFEM::UI::DrawCameraRotationArrows(orientation,mouse,hovered && !existingDrag,rotationIcons);
     }
 
@@ -1996,6 +2245,12 @@ private:
     bool follow=true,playing=false,wireframe=false,showSurface=true,showBoundaries=true,showDofs=false,deform=true,clip=false,planeGuide=false;
     bool cameraAdjusted=false;
     bool keepReferencePlane=false;
+    bool showModelAxes=true,orientByModelAxis=true;
+    // The view's spin. Axis choices are these, then each model axis.
+    enum SpinAxis {SpinScreenUp,SpinScreenRight,SpinWorldX,SpinWorldY,SpinWorldZ,SpinThrown,SpinModel};
+    struct {bool active=false;int axis=SpinScreenUp;float rate=30;bool throwing=true;Vector3 thrown{0,1,0};} spin;
+    RayFEM::DragVelocity dragVelocity;
+    bool orbitDragging=false,throwByCube=false;
     Vector3 referenceRotation{};
     std::array<Texture2D,4> rotationIcons{};
     RayFEM::CameraDragState cameraDrag;
@@ -2009,6 +2264,9 @@ private:
     Shader shader{};
     RayFEM::UI::EdgeRenderer edgeRenderer;
     RayFEM::UI::Figure::Exporter figureExporter;
+    RayFEM::UI::Movie::Exporter movieExporter;
+    RenderTexture2D movieTarget{};
+    std::vector<std::shared_ptr<RayFEM::RenderFrame>> movieFrames;
     RayFEM::UI::DofRenderer dofRenderer;
     RayFEM::UI::RayPlacement rayPlacement;
     ImVec2 viewportOrigin{},viewportSize{};

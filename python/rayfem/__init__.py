@@ -26,7 +26,7 @@ from ._viewer import viewer_executable
 
 __version__ = "0.1.0"
 __all__ = [
-    "Client", "Field", "InitStatus", "RayFEMError", "Schema", "ShutdownStatus", "Tag", "Value",
+    "Axis", "Client", "Field", "InitStatus", "RayFEMError", "Schema", "ShutdownStatus", "Tag", "Value",
     "ViewerStats", "init", "shutdown", "stats", "viewer_executable",
 ]
 
@@ -103,17 +103,44 @@ class Tag:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class Axis:
+    """A direction of the model in mesh coordinates, such as its rotation axis or magnetic poles.
+
+    ``direction`` points to the positive (north) end and may have any nonzero
+    length; ``origin`` is a point the axis passes through. The viewer can turn
+    the view so the first axis points up, spin about any axis and draw them.
+    It never changes the data.
+    """
+    name: str
+    direction: Sequence[float] = (0.0, 0.0, 1.0)
+    origin: Sequence[float] = (0.0, 0.0, 0.0)
+    description: str = ""
+
+
 @dataclass
 class Schema:
     """What frames will carry, registered once with :meth:`Client.register_schema`.
 
     ``has_time=False`` says simulation time means nothing (a static solve);
-    ``primary`` names the coordinate frames are labelled by.
+    ``primary`` names the coordinate frames are labelled by; ``axes`` are the
+    model's axes (at most 8), the first orienting the view.
     """
     values: Sequence[Value] = field(default_factory=list)
     tags: Sequence[Tag] = field(default_factory=list)
     has_time: bool = True
     primary: str = ""
+    axes: Sequence[Axis] = field(default_factory=list)
+
+
+def _vector3(values: Sequence[float], name: str) -> tuple[float, float, float]:
+    """Three floats; a 2D vector gains z = 0."""
+    numbers = [float(v) for v in values]
+    if len(numbers) == 2:
+        numbers.append(0.0)
+    if len(numbers) != 3:
+        raise RayFEMError(f"Axis {name} needs 2 or 3 components")
+    return (numbers[0], numbers[1], numbers[2])
 
 
 def _float64(values: Any) -> Any:
@@ -190,11 +217,12 @@ class Client:
         return self._client().address
 
     def register_schema(self, schema: Schema) -> None:
-        """Declare the values and tags frames will carry; registering again replaces it."""
+        """Declare the values, tags and model axes frames will carry; registering again replaces it."""
         values = [(v.name, v.type, v.coordinate, v.unit, v.description) for v in schema.values]
         tags = [(t.name, t.description) for t in schema.tags]
+        axes = [(a.name, _vector3(a.direction, a.name), _vector3(a.origin, a.name), a.description) for a in schema.axes]
         try:
-            self._client().register_schema(values, tags, schema.has_time, schema.primary)
+            self._client().register_schema(values, tags, schema.has_time, schema.primary, axes)
         except (RuntimeError, ValueError, TypeError) as error:
             raise RayFEMError(str(error)) from error
 

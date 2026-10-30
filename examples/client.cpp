@@ -38,6 +38,7 @@ struct Options {
     std::uint64_t mesh_id = 1;
     int iterations = 0;         // frames per time step, each an iterate of a solve
     bool static_model = false;  // time means nothing; frames are iterations of one solve
+    std::vector<double> axis;   // a model rotation axis to report, x y z
 };
 
 std::unique_ptr<mfem::Mesh> makeMesh(const Options& options) {
@@ -179,8 +180,8 @@ int stream(const Options& options) {
     client.setBinaryFields(!options.text_fields);
     // Declare what frames will carry: progress coordinates, values to show,
     // and tags telling iterates from converged frames.
+    RayFEM::FrameSchema schema;
     if (options.iterations > 0) {
-        RayFEM::FrameSchema schema;
         schema.values = {
             {"step", RayFEM::ValueType::Integer, true, "", "Time step being solved"},
             {"iteration", RayFEM::ValueType::Integer, true, "", "Nonlinear iteration within the step"},
@@ -190,8 +191,12 @@ int stream(const Options& options) {
         schema.tags = {{"iterate", "An intermediate nonlinear iterate"}, {"converged", "The converged state for this step"}};
         schema.has_time = !options.static_model;
         schema.primary = options.static_model ? "iteration" : "";
-        if (!client.registerSchema(schema)) throw std::runtime_error("Failed to register schema: " + client.getLastError());
     }
+    // The model's rotation axis: the viewer orients and can spin the view by it.
+    if (options.axis.size() == 3)
+        schema.axes = {{"rotation", {options.axis[0], options.axis[1], options.axis[2]}, {0, 0, 0}, "Rotation axis"}};
+    if (options.iterations > 0 || !schema.axes.empty())
+        if (!client.registerSchema(schema)) throw std::runtime_error("Failed to register schema: " + client.getLastError());
     if (!client.sendMesh(options.mesh_id, *mesh)) {
         throw std::runtime_error("Failed to send mesh: " + client.getLastError());
     }
@@ -292,6 +297,7 @@ int main(int argc, char** argv) {
     app.add_option("--mesh-id", options.mesh_id, "Identifier used for mesh reuse");
     app.add_option("--iterations", options.iterations, "Describe frames as iterates: this many per time step, the last tagged converged")
         ->check(CLI::Range(0, 1000));
+    app.add_option("--axis", options.axis, "Report this model rotation axis (x y z) through the origin")->expected(3);
     app.add_flag("--static", options.static_model, "With --iterations: one static solve, so time is not meaningful");
     CLI11_PARSE(app, argc, argv);
     if (fps->count() != 0) { options.interval = 1.0 / options.fps; }

@@ -44,3 +44,11 @@ test('element_panel', element_panel_test, timeout: 30)
 streamline_pulse_test = executable('streamline_pulse_test', 'streamline_pulse_test.cpp',
     dependencies: [raylib_dep, viewer_headers_dep])
 test('streamline_pulse', streamline_pulse_test, timeout: 30)
+
+spin_test = executable('spin_test', 'spin_test.cpp',
+    dependencies: [raylib_dep, viewer_headers_dep])
+test('spin', spin_test, timeout: 30)
+
+movie_test = executable('movie_test', 'movie_test.cpp',
+    dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
+test('movie', movie_test, timeout: 60)

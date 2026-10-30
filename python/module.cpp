@@ -10,6 +10,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
@@ -119,16 +120,20 @@ NB_MODULE(_rayfem, m) {
         .def("register_schema", [](RayFEM::StreamClient& client,
                                    const std::vector<std::tuple<std::string, std::string, bool, std::string, std::string>>& values,
                                    const std::vector<std::pair<std::string, std::string>>& tags, bool has_time,
-                                   const std::string& primary) {
+                                   const std::string& primary,
+                                   const std::vector<std::tuple<std::string, std::array<double, 3>, std::array<double, 3>, std::string>>& axes) {
                 RayFEM::FrameSchema schema;
+                for (const auto& [name, direction, origin, description] : axes)
+                    schema.axes.push_back({name, direction, origin, description});
                 for (const auto& [name, type, coordinate, unit, description] : values)
                     schema.values.push_back({name, ToType(type), coordinate, unit, description});
                 for (const auto& [name, description] : tags) schema.tags.push_back({name, description});
                 schema.has_time = has_time;
                 schema.primary = primary;
                 Check(client.registerSchema(schema), client);
-            }, "values"_a, "tags"_a, "has_time"_a = true, "primary"_a = "",
-            "values: (name, 'int'|'float'|'str', coordinate, unit, description); tags: (name, description).")
+            }, "values"_a, "tags"_a, "has_time"_a = true, "primary"_a = "", "axes"_a = std::vector<std::tuple<std::string, std::array<double, 3>, std::array<double, 3>, std::string>>{},
+            "values: (name, 'int'|'float'|'str', coordinate, unit, description); tags: (name, description); "
+            "axes: (name, direction, origin, description).")
         .def("send_mesh", [](RayFEM::StreamClient& client, uint64_t mesh_id, nb::bytes text) {
                 const std::string_view view(text.c_str(), text.size());
                 bool ok;

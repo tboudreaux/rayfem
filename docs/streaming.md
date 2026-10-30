@@ -103,6 +103,19 @@ viewer.sendFrame(mesh_id, fields, metadata);
 
 A frame may carry any subset of the declared values, each at most once; integers are accepted for real values. Undeclared names or tags, wrong types, non-finite numbers and text over 1024 bytes are refused by `sendFrame` with a reason in `getLastError()`. Registering again replaces the schema for later frames, and the client re-sends it with every `sendMesh`, so a restarted viewer recovers. Schemas allow up to 64 values and 64 tags. In the viewer, the funnel button on the timeline filters frames by tag and coordinate range (optionally discarding others as they arrive), and Analyze > Frame lists the shown frame's values and tags. `exampleClient --iterations 5` demonstrates time steps converged in five iterates; add `--static` for one static solve.
 
+### Model axes
+
+A schema can also describe the model's axes, such as a star's rotation axis or its magnetic poles, in mesh coordinates: a name, a direction toward the positive (north) end and a point the axis passes through. They are purely descriptive. The viewer can put the first axis up the screen for Home and Fit, draw the axes and spin the view about any of them; it never changes the data.
+
+```cpp
+RayFEM::FrameSchema schema;
+schema.axes = {{"rotation", {0, 0, 1}, {0, 0, 0}, "Rotation axis"},
+               {"magnetic", {0.2, 0, 1}, {0, 0, 0}, "Dipole axis"}};
+client.registerSchema(schema);
+```
+
+A schema may hold up to 8 axes with unique names and finite, nonzero directions; it can declare axes alone. Axes are sent only when present, so a schema without them is encoded exactly as before. `exampleClient --axis 0 1 0.3` reports a rotation axis through the origin.
+
 ### Reuse geometry with displacement
 
 A displacement specifies offsets from the registered reference mesh, not offsets from the previous frame. Frames therefore do not accumulate drift when dropped or viewed out of order. Use the mesh geometry's own finite element space for one displacement per geometry DOF. RayFEM also accepts a different scalar-basis finite element space on the same base mesh, provided it has one vector component per spatial dimension; it evaluates that vector field at each rendered point. ND/RT directional fields are not valid pointwise displacements:

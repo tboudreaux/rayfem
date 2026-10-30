@@ -98,19 +98,30 @@ inline std::optional<OrientationCubeHit> PickOrientationCube(
     for(int i=0;i<3;++i)target[i]=i==axis?sign:(std::abs(p[i])>=.6f?(p[i]<0?-1.0f:1.0f):0);
     return OrientationCubeHit{{target[0],target[1],target[2]},point,axis};
 }
-struct OrientationCubeInputState {bool captured=false;};
+struct OrientationCubeInputState {
+    bool captured=false;
+    bool cube_press=false; // a left press on the cube itself: a click or a drag
+    bool dragging=false;
+    Vector2 press{},previous{};
+};
 struct OrientationCubeInputResult {
     bool owns_pointer=false;
     std::optional<OrientationCubeHit> selected;
     int rotation_button=-1;
     bool home=false;
+    Vector2 orbit{}; // pixels to orbit the camera by while the cube is dragged
+    bool dragging=false;
 };
+// The cube's orbit rate: a drag across the whole cube turns about 90°.
+inline constexpr float OrientationCubeOrbitRate=.012f;
 // A press on the card owns the pointer until release, including blank corners.
 // A mesh/profile drag already in progress retains ownership when crossing it.
+// On the cube, a press released in place aligns the camera to the face, edge
+// or corner under it; moved past a few pixels, it orbits the camera instead.
 inline OrientationCubeInputResult UpdateOrientationControlsInput(
         OrientationCubeInputState& state,const CameraInputSnapshot& input,
         const Camera3D& camera,const OrientationControlsLayout& layout,bool other_drag) {
-    if(input.cancel_drag || other_drag) {state.captured=false;return {};}
+    if(input.cancel_drag || other_drag) {state=OrientationCubeInputState{};return {};}
     const bool over=input.viewport_hovered && CameraViewportContains(input.mouse,layout.bounds);
     const bool wasCaptured=state.captured;
     if(!input.left_down && !input.middle_down)state.captured=false;
@@ -119,8 +130,23 @@ inline OrientationCubeInputResult UpdateOrientationControlsInput(
     if(over && input.left_pressed) {
         result.rotation_button=PickCameraRotationArrow(input.mouse,layout);
         result.home=layout.home.width>0 && CameraViewportContains(input.mouse,layout.home);
-        if(result.rotation_button<0 && !result.home)result.selected=PickOrientationCube(input.mouse,camera,layout.cube);
+        if(result.rotation_button<0 && !result.home && CameraViewportContains(input.mouse,layout.cube)) {
+            state.cube_press=true;state.dragging=false;
+            state.press=state.previous=input.mouse;
+        }
     }
+    if(state.cube_press && input.left_down && !input.left_pressed) {
+        if(!state.dragging && Vector2DistanceSqr(input.mouse,state.press)>16)state.dragging=true;
+        if(state.dragging) {
+            result.orbit=Vector2Subtract(input.mouse,state.previous);
+            state.previous=input.mouse;
+        }
+    }
+    if(state.cube_press && !input.left_down) {
+        if(!state.dragging)result.selected=PickOrientationCube(state.press,camera,layout.cube);
+        state.cube_press=state.dragging=false;
+    }
+    result.dragging=state.dragging;
     return result;
 }
 inline OrientationCubeInputResult UpdateOrientationCubeInput(
@@ -139,11 +165,11 @@ inline std::string OrientationCubeLabel(Vector3 direction) {
     }
     return result;
 }
-inline void DrawOrientationCube(const Camera3D& camera,Rectangle box,Vector2 mouse,bool interactive) {
+inline void DrawOrientationCube(const Camera3D& camera,Rectangle box,Vector2 mouse,bool interactive,bool dragging=false) {
     if(box.width<=0 || box.height<=0)return;
     auto* draw=ImGui::GetWindowDrawList();
     const auto basis=CameraBasis(camera);
-    const auto hover=interactive?PickOrientationCube(mouse,camera,box):std::nullopt;
+    const auto hover=interactive && !dragging?PickOrientationCube(mouse,camera,box):std::nullopt;
     const auto& palette=Palette();
     const bool light=CurrentTheme()==ThemeMode::Light;
     const ImVec2 low{box.x,box.y},high{box.x+box.width,box.y+box.height};
@@ -193,10 +219,11 @@ inline void DrawOrientationCube(const Camera3D& camera,Rectangle box,Vector2 mou
             draw->AddText(ImGui::GetFont(),fontSize,{center.x-textSize.x*.5f,center.y-textSize.y*.5f},axes[axis],label);
         }
     }
-    if(interactive && CameraViewportContains(mouse,box)) {
+    if(dragging)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+    else if(interactive && CameraViewportContains(mouse,box)) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        if(hover)ImGui::SetTooltip("%s\nClick to align",OrientationCubeLabel(hover->direction).c_str());
-        else if(ImGui::IsMouseHoveringRect(low,high))ImGui::SetTooltip("Click a face, edge or corner to align the camera");
+        if(hover)ImGui::SetTooltip("%s\nClick to align · drag to rotate",OrientationCubeLabel(hover->direction).c_str());
+        else if(ImGui::IsMouseHoveringRect(low,high))ImGui::SetTooltip("Click a face, edge or corner to align the camera, or drag to rotate");
     }
 }
 inline void DrawCameraRotationArrows(const OrientationControlsLayout& layout,Vector2 mouse,bool interactive,

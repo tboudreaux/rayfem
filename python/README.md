@@ -65,6 +65,14 @@ client.send_frame(1, fields, index=n, values={"iteration": n, "residual": r},
                   tags=["converged"] if done else [])
 ```
 
+A schema can also report the model's axes (`rayfem.Axis(name, direction,
+origin)`), such as its rotation axis. The viewer can put the first axis up
+the screen, draw the axes and spin the view about them:
+
+```python
+client.register_schema(rayfem.Schema(axes=[rayfem.Axis("rotation", (0, 0, 1))]))
+```
+
 Sending is one-way, but a send raises `RayFEMError` when no viewer is
 listening at the client's address (it closed, or moved to another host or
 port from its info menu), and a frame raises when the viewer's listener

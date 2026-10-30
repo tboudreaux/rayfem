@@ -29,11 +29,11 @@ closes it); see [docs/python.md](docs/python.md).
 - [Building and testing](docs/building.md): dependencies, local prefixes, tests,
   installing with pkg-config, sharing MFEM with a parent project, SERiF archives
   and the Stroid check.
-- [Using the viewer](docs/viewer.md): appearance and navigation, color scales,
-  the example producers, vector flow, tracking, profiles, surface traces,
+- [Using the viewer](docs/viewer.md): appearance and navigation, spin, model
+  axes, movies, color scales, the example producers, vector flow, tracking, profiles, surface traces,
   materials, and the viewer's limits.
 - [Streaming from C++](docs/streaming.md): starting a viewer, the client API,
-  frame schemas, displacement, and changing the viewer's listener.
+  frame schemas and model axes, displacement, and changing the viewer's listener.
 - [Python package](docs/python.md): wheels, the data model shared with other
   packages, and the Python tests; the API is in [python/README.md](python/README.md).
 

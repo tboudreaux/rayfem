@@ -89,6 +89,28 @@ void testSchemaEncoding() {
     std::string truncated = Protocol::encodeSchema(schema);
     truncated.pop_back();
     require(!Protocol::decodeSchema(truncated, decoded, error), "Truncated schemas are rejected");
+    // Model axes round trip, appended after the layout of schemas without them.
+    auto oriented = schema;
+    oriented.axes = {{"rotation", {0, 0, 2}, {0, 0, 0}, "Spin axis"}, {"magnetic", {0.1, 0, 1}, {0, 0, 0.5}, ""}};
+    require(Protocol::validateSchema(oriented, error), error);
+    require(Protocol::decodeSchema(Protocol::encodeSchema(oriented), decoded, error), error);
+    require(decoded.axes.size() == 2 && decoded.axes[0].name == "rotation" && decoded.axes[0].direction[2] == 2 &&
+            decoded.axes[0].description == "Spin axis" && decoded.axes[1].direction[0] == 0.1 && decoded.axes[1].origin[2] == 0.5,
+            "Model axes round trip");
+    require(Protocol::encodeSchema(oriented).starts_with(Protocol::encodeSchema(schema)), "Axes follow the earlier layout");
+    require(Protocol::decodeSchema(Protocol::encodeSchema(schema), decoded, error) && decoded.axes.empty(), "No axes decode as none");
+    broken = oriented; broken.axes[1].direction = {0, 0, 0};
+    require(!Protocol::validateSchema(broken, error), "A zero axis direction is rejected");
+    broken = oriented; broken.axes[1].name = "rotation";
+    require(!Protocol::validateSchema(broken, error), "Duplicate axis names are rejected");
+    broken = oriented; broken.axes[0].origin[1] = std::nan("");
+    require(!Protocol::validateSchema(broken, error), "Nonfinite axes are rejected");
+    broken = oriented; broken.axes.resize(9, oriented.axes[0]);
+    for (size_t i = 0; i < broken.axes.size(); ++i) broken.axes[i].name = "axis " + std::to_string(i);
+    require(!Protocol::validateSchema(broken, error), "More than eight axes are rejected");
+    truncated = Protocol::encodeSchema(oriented);
+    truncated.pop_back();
+    require(!Protocol::decodeSchema(truncated, decoded, error), "Truncated axes are rejected");
     // Descriptors: integers widen to reals; types, names and tags are checked.
     FrameMetadata metadata;
     metadata.values = {{"virial ratio", int64_t{1}}, {"iteration", int64_t{4}}, {"solver", std::string("Newton")}};
@@ -448,7 +470,9 @@ int main(int argc, char** argv) {
             early.values = {{"iteration", int64_t{1}}};
             require(described.sendMesh(30, mesh), described.getLastError());
             require(!described.sendFrame(30, fields, early), "Values without a schema are refused by the client");
-            require(described.registerSchema(iterationSchema()), described.getLastError());
+            auto withAxes = iterationSchema();
+            withAxes.axes = {{"rotation", {0, 0, 1}, {0, 0, 0}, "Spin axis"}};
+            require(described.registerSchema(withAxes), described.getLastError());
             require(described.sendMesh(30, mesh), described.getLastError());
             RayFEM::FrameMetadata wrong;
             wrong.values = {{"virial ratio", std::string("high")}};
@@ -463,6 +487,8 @@ int main(int argc, char** argv) {
             auto received = receive(server, 3);
             const auto& last = received.back();
             require(last->schema && !last->schema->has_time && last->schema->primary == "iteration", "Frames carry their schema");
+            require(last->schema->axes.size() == 1 && last->schema->axes[0].name == "rotation" &&
+                    last->schema->axes[0].direction[2] == 1, "Frames carry the model axes");
             require(last->metadata.number("iteration") == 3.0 && last->metadata.hasTag("converged") &&
                     std::abs(*last->metadata.number("virial ratio") - (1.0 + 0.1/3)) < 1e-15 && !last->metadata.find("solver"),
                     "Frame values and tags arrive decoded");

@@ -28,6 +28,16 @@ struct ValueField {
     std::string unit, description;
 };
 struct TagField { std::string name, description; };
+// A direction of the underlying model in mesh coordinates, such as its
+// rotation axis or its magnetic poles. Purely descriptive: the viewer can
+// orient the view so the first axis points up, spin the view about an axis
+// and draw the axes, but never changes the data.
+struct ModelAxis {
+    std::string name;                         // "rotation", "magnetic", ...
+    std::array<double, 3> direction{0, 0, 1}; // toward the positive (north) end; any nonzero length
+    std::array<double, 3> origin{0, 0, 0};    // a point the axis passes through
+    std::string description;
+};
 struct FrameSchema {
     std::vector<ValueField> values;
     std::vector<TagField> tags;
@@ -36,6 +46,8 @@ struct FrameSchema {
     bool has_time = true;
     // The coordinate frames are labelled and plotted by; empty uses time.
     std::string primary;
+    // The model's axes; the first orients the view.
+    std::vector<ModelAxis> axes;
     const ValueField* find(std::string_view name) const {
         for (const auto& v : values) if (v.name == name) return &v;
         return nullptr;
@@ -88,6 +100,7 @@ inline constexpr size_t MaxSpaceHeaderBytes = 1024 * 1024;
 // A frame payload ends with a descriptor (its schema values and tags).
 inline constexpr uint32_t HasDescriptor = 4;
 inline constexpr size_t MaxSchemaEntries = 64;
+inline constexpr size_t MaxModelAxes = 8;
 inline constexpr size_t MaxTextBytes = 1024;
 inline constexpr std::string_view SchemaMagic{"RFS1", 4};
 enum class Kind : uint16_t { Mesh = 1, Frame = 2, Schema = 3 };
@@ -200,6 +213,18 @@ inline bool validateSchema(const FrameSchema& schema, std::string& error) {
         const auto* primary = schema.find(schema.primary);
         if (!primary || !primary->coordinate) return fail("The primary coordinate must be a declared coordinate");
     }
+    if (schema.axes.size() > MaxModelAxes) return fail("A schema declares at most 8 model axes");
+    std::unordered_set<std::string_view> axes;
+    for (const auto& a : schema.axes) {
+        if (!validName(a.name) || !axes.insert(a.name).second) return fail("Model axis names must be unique, nonempty and at most 255 bytes");
+        if (a.description.size() > MaxTextBytes) return fail("Description too long for axis " + a.name);
+        double length = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(a.direction[i]) || !std::isfinite(a.origin[i])) return fail("Axis " + a.name + " must be finite");
+            length += a.direction[i] * a.direction[i];
+        }
+        if (!(length > 0) || !std::isfinite(length)) return fail("Axis " + a.name + " needs a nonzero direction");
+    }
     return true;
 }
 inline std::string encodeSchema(const FrameSchema& schema) {
@@ -214,6 +239,16 @@ inline std::string encodeSchema(const FrameSchema& schema) {
     }
     appendInteger(out, schema.tags.size(), 2);
     for (const auto& t : schema.tags) { appendText(out, t.name); appendText(out, t.description); }
+    // Axes follow only when there are any, so schemas without them keep the
+    // layout viewers before model axes accept.
+    if (!schema.axes.empty()) {
+        appendInteger(out, schema.axes.size(), 2);
+        for (const auto& a : schema.axes) {
+            appendText(out, a.name); appendText(out, a.description);
+            for (double v : a.direction) appendInteger(out, std::bit_cast<uint64_t>(v), 8);
+            for (double v : a.origin) appendInteger(out, std::bit_cast<uint64_t>(v), 8);
+        }
+    }
     return out;
 }
 inline bool decodeSchema(std::string_view data, FrameSchema& schema, std::string& error) {
@@ -241,6 +276,20 @@ inline bool decodeSchema(std::string_view data, FrameSchema& schema, std::string
         TagField t;
         if (!readText(data, pos, MaxNameBytes, t.name) || !readText(data, pos, MaxTextBytes, t.description)) return fail("Truncated schema tag");
         schema.tags.push_back(std::move(t));
+    }
+    if (pos < data.size()) {
+        if (!readInteger(data, pos, 2, count) || count == 0 || count > MaxModelAxes) return fail("Truncated or oversized model axes");
+        for (uint64_t i = 0; i < count; ++i) {
+            ModelAxis a;
+            if (!readText(data, pos, MaxNameBytes, a.name) || !readText(data, pos, MaxTextBytes, a.description))
+                return fail("Truncated model axis");
+            for (auto* values : {&a.direction, &a.origin})
+                for (double& v : *values) {
+                    if (!readInteger(data, pos, 8, value)) return fail("Truncated model axis");
+                    v = std::bit_cast<double>(value);
+                }
+            schema.axes.push_back(std::move(a));
+        }
     }
     if (pos != data.size()) return fail("Unexpected bytes after schema");
     return validateSchema(schema, error);

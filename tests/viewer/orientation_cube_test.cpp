@@ -170,18 +170,39 @@ void InputOwnership() {
     input.viewport_hovered = true;
     input.left_pressed = input.left_down = true;
     auto result = UpdateOrientationCubeInput(state, input, camera, box, false);
-    Check(result.owns_pointer && result.selected && state.captured, "Cube click selects and captures pointer");
+    Check(result.owns_pointer && !result.selected && state.captured, "Cube press captures the pointer and waits for release");
+    input.left_pressed = input.left_down = false;
+    result = UpdateOrientationCubeInput(state, input, camera, box, false);
+    Check(result.owns_pointer && result.selected && !state.captured, "Cube click selects on release");
     Near(result.selected->direction, {0, 0, 1}, "Cube center click selects front");
+    input.mouse = {90, 264};
+    input.viewport_hovered = false;
+    Check(!UpdateOrientationCubeInput(state, input, camera, box, false).owns_pointer,
+          "Later pointer motion outside the cube is unclaimed");
+
+    // A press that moves becomes a drag: it orbits by the pointer's motion,
+    // also outside the cube, and never selects.
+    input.mouse = {164, 264};
+    input.left_pressed = input.left_down = true;
+    input.viewport_hovered = true;
+    result = UpdateOrientationCubeInput(state, input, camera, box, false);
     input.left_pressed = false;
+    input.mouse = {166, 265};
+    result = UpdateOrientationCubeInput(state, input, camera, box, false);
+    Check(!result.dragging && result.orbit.x == 0 && result.orbit.y == 0, "A small wobble stays a click");
+    input.mouse = {174, 260};
+    result = UpdateOrientationCubeInput(state, input, camera, box, false);
+    Check(result.dragging && result.owns_pointer, "Moving past the threshold starts a drag");
+    Near(Vector3{result.orbit.x, result.orbit.y, 0}, {10, -4, 0}, "The first drag step keeps the motion since the press");
     input.mouse = {90, 264};
     input.viewport_hovered = false;
     result = UpdateOrientationCubeInput(state, input, camera, box, false);
-    Check(result.owns_pointer && !result.selected && state.captured, "Cube press cannot become an orbit after leaving");
+    Check(result.dragging && result.owns_pointer, "The drag continues outside the cube");
+    Near(Vector3{result.orbit.x, result.orbit.y, 0}, {-84, 4, 0}, "Each step orbits by the pointer's motion");
     input.left_down = false;
     result = UpdateOrientationCubeInput(state, input, camera, box, false);
-    Check(result.owns_pointer && !result.selected && !state.captured, "Release frame is consumed then capture ends");
-    Check(!UpdateOrientationCubeInput(state, input, camera, box, false).owns_pointer,
-          "Later pointer motion outside the cube is unclaimed");
+    Check(result.owns_pointer && !result.selected && !result.dragging && !state.captured,
+          "Releasing a drag selects nothing and ends capture");
 
     input = {};
     input.mouse = {101, 201};
@@ -210,7 +231,7 @@ void InputOwnership() {
           "An established mesh or profile drag retains ownership across the cube");
     input.left_pressed = true;
     result = UpdateOrientationCubeInput(state, input, camera, box, false);
-    Check(result.selected.has_value(), "A fresh cube press can acquire pointer after previous drag ends");
+    Check(result.owns_pointer && state.cube_press, "A fresh cube press can acquire pointer after previous drag ends");
     input.cancel_drag = true;
     result = UpdateOrientationCubeInput(state, input, camera, box, false);
     Check(!result.owns_pointer && !result.selected && !state.captured, "Lost focus cancels cube input immediately");
@@ -219,6 +240,18 @@ void InputOwnership() {
     result = UpdateOrientationCubeInput(state, input, camera, box, false);
     Check(!result.owns_pointer && !result.selected && !state.captured,
           "Popup-blocked viewport cannot start a cube selection");
+}
+
+void CubeOrbit() {
+    Camera3D camera{{0, 0, 10}, {1, 2, 3}, {0, 1, 0}, 40, CAMERA_PERSPECTIVE};
+    camera.position = {1, 2, 13};
+    OrbitCamera(camera, {100, 0}, .01f);
+    Check(std::abs(Vector3Distance(camera.position, camera.target) - 10) < 1e-4f, "Orbiting keeps the distance");
+    Near(camera.up, {0, 1, 0}, "A horizontal drag keeps the up direction");
+    Check(camera.position.x < 1, "Dragging right turns the scene with the pointer");
+    const Camera3D before = camera;
+    OrbitCamera(camera, {0, 0}, .01f);
+    Near(camera.position, before.position, "No motion leaves the camera alone");
 }
 
 Vector2 Center(Rectangle bounds) {
@@ -254,10 +287,14 @@ void RotationButtonSelection() {
     CameraInputSnapshot input;
     input.mouse = cubeCenter;
     input.viewport_hovered = input.left_pressed = input.left_down = true;
-    const auto result = UpdateOrientationControlsInput(state, input, camera, layout, false);
+    auto result = UpdateOrientationControlsInput(state, input, camera, layout, false);
+    Check(!result.selected && result.rotation_button == -1 && state.cube_press, "A cube press above the arrows is a cube press");
+    input.left_pressed = input.left_down = false;
+    result = UpdateOrientationControlsInput(state, input, camera, layout, false);
     Check(result.selected && result.rotation_button == -1, "Cube picking remains available above rotation controls");
     Near(result.selected->direction, {0, 0, 1}, "Combined controls retain front-face destination");
     input.mouse=Center(layout.home);
+    input.left_pressed=input.left_down=true;
     state={};
     const auto home=UpdateOrientationControlsInput(state,input,camera,layout,false);
     Check(home.home && home.owns_pointer && state.captured && home.rotation_button==-1 && !home.selected,
@@ -384,6 +421,7 @@ int main() {
         TileBoundariesAndMisses();
         Layout();
         InputOwnership();
+        CubeOrbit();
         RotationButtonSelection();
         RotationControlLayout();
         RotationControlOwnership();

@@ -4,7 +4,11 @@
 
 The **Light mode / Dark mode** button changes the controls, viewport, plots, legends, DOF markers, and flow overlays together. Scientific surface and heatmap colors retain their data meaning. `RayFEM --light` starts in light mode.
 
-The orientation cube in the viewport's upper-right corner follows the camera. Click a face, edge, or corner for one of 26 views; the camera eases smoothly into place while preserving its target and zoom. Axis signs label the faces (Y is up, +Z is front). Dragging, panning, zooming, or fitting the mesh interrupts the transition.
+The orientation cube in the viewport's upper-right corner follows the camera. Click a face, edge, or corner for one of 26 views; the camera eases smoothly into place while preserving its target and zoom. Axis signs label the faces (Y is up, +Z is front). Drag the cube to turn the view: it follows the pointer like a dragged mesh, faster, so a drag across the cube turns about 90°. A press that does not move is a click. Dragging, panning, zooming, or fitting the mesh interrupts the transition.
+
+**Spin** in the toolbar (or `S` over the viewport) keeps the view turning, as in GLVis; only the camera moves, never the data or its time. The menu beside it chooses the axis — screen vertical (a turntable), screen horizontal, world X, Y or Z, or one of the model's axes — and the rate in degrees per second; negative rates turn the other way. A model axis turns the view about the model's own axis line. With **Throw to spin** on, releasing a drag (in the view or on the cube) while the pointer still moves keeps the view turning that way at that speed. A click in the view, Fit, Home or a cube click stops the spin.
+
+When a client reports axes for its model (see [model axes](streaming.md#model-axes)), **View → Appearance → Model axes** draws each one as a rod through the model with an arrowhead and its name at the positive end; the model hides the parts inside it. **Orient by … axis** (on by default) makes Fit and Home put the first axis up the screen, looking from 20° above the model's equator, instead of down at the reference plane.
 
 The arrows below the cube rotate the image counterclockwise/clockwise around the viewing direction: single arrows move 5° and double arrows move 45°, with the same smooth easing. Repeated clicks accumulate their full increments during animation. Their artwork comes from `assets/rotation`. Rebuilds automatically regenerate the embedded icons when an SVG changes if `rsvg-convert` is available. Builds without it use the checked-in artwork after verifying that it matches the SVGs; stale artwork causes an explicit build error. Run `python3 tools/generate_rotation_icons.py` to refresh that portable fallback after editing assets. Installed viewers do not need an SVG renderer.
 
@@ -19,6 +23,17 @@ The color scale defaults to the current field's range throughout the selected vo
 The **Scale** selector offers **Linear** (default), **Signed log**, and **ZScale**. Signed log uses `sign(x) * log1p(abs(x)/threshold)`, which is continuous at zero and supports either sign. Its automatic threshold is 1% of the largest absolute display limit; a custom threshold is in field units. Legend labels and hover values invert the selected transform. ZScale uses the [IRAF/DS9 ranked-sample line fit](https://iraf.readthedocs.io/en/latest/tasks/images/tv/display.html#zscale-algorithm), with iterative outlier rejection and adjustable contrast (default 0.25), then maps the fitted limits linearly. Higher contrast narrows the limits; zero uses the full range. Turning off **Automatic volume range** freezes the displayed limits, including fitted ZScale limits, across frames. The legend tooltip retains the full volume extrema.
 
 ZScale takes up to 1,000 deterministic samples spread throughout the selected field volume, including clipped regions. This samples reference-cell lattices and FE nodes; it approximates the distribution and is not weighted by physical volume. Material exclusions still apply. Flow uses its whole-volume magnitude distribution; 2D heatmaps use their valid plane samples. Scalar profile and tracking axes remain unchanged. Library consumers can set `RenderOptions::color_scale`, or use `ResolveColorScale`, `ColorScaleFraction`, and `ColorScaleValue` from `libRayfem/mesh/color_scale.hpp`. To reproduce the viewer's volume-based limits, request `FieldRangeOptions::distribution_samples`, resolve the mapping from the resulting `FieldRange::samples`, then call `ApplyFieldColorRange(surface, mapping)`.
+
+## Movies
+
+**Movie** in the toolbar opens a window that exports the frames the timeline shows (the funnel filter chooses them) as an H.264 MP4. It needs an `ffmpeg` executable, found on `PATH`, in the usual Homebrew and system locations, or named by `RAYFEM_FFMPEG`; it uses libx264 when available and otherwise the platform's hardware encoder. Nothing is built into RayFEM.
+
+- **Frames:** a range of the shown frames, the video rate (24, 30 or 60 fps) and how long each frame stays on screen.
+- **Camera:** keyframes record the view on screen at the frame on screen. Step to a frame, arrange the view, then **Add keyframe here**; each keyframe can be revisited, replaced with the current view or removed. Between keyframes the camera turns along the shortest rotation, zooms geometrically and moves its target in a straight line, easing in and out at each keyframe or at constant speed. Before the first and after the last keyframe it holds still; with none, it keeps the view it has when the export starts. **Spin the view** adds the toolbar spin (its axis and rate) on top.
+- **Preview:** scrub through the movie; the view shows each moment's frame and camera.
+- **Output:** size (rounded down to even numbers), optional 2× supersampling, quality as x264's constant rate factor (18 looks lossless), and the file.
+
+The export renders each frame offscreen as figures do, without the selection, profile guides or reference plane unless it is kept. The window stays open while you work, so keyframes can be placed from the live view; frames being exported are kept in the history until the export ends.
 
 ## Exercise the viewer
 

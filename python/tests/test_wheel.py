@@ -107,7 +107,12 @@ def test_client_refusals() -> None:
         assert "bool" in expect_error(client.send_frame, 1, [field], index=1, values={"iteration": True})
         assert "not in the registered schema" in expect_error(client.send_frame, 1, [field], index=1, tags=["converged"])
         assert "coordinate" in expect_error(client.register_schema, rayfem.Schema(values=[rayfem.Value("x", "str", coordinate=True)])).lower()
+        assert "nonzero" in expect_error(client.register_schema, rayfem.Schema(axes=[rayfem.Axis("spin", (0, 0, 0))]))
+        assert "2 or 3" in expect_error(client.register_schema, rayfem.Schema(axes=[rayfem.Axis("spin", (1,))]))
         client.send_frame(1, [field], index=1, values={"iteration": 3})
+        # Axes alone are a valid schema; frames then carry no values.
+        client.register_schema(rayfem.Schema(axes=[rayfem.Axis("rotation", (0, 0, 1)), rayfem.Axis("magnetic", (0.2, 1), (0, 0, 0.1))]))
+        client.send_frame(1, [field], index=2)
     finally:
         assert rayfem.shutdown(port, timeout=20)
     # The viewer closed: the next send says so.
