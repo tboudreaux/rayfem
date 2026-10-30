@@ -288,6 +288,36 @@ for (std::uint32_t step = 0; step < number_of_steps; ++step) {
 
 A frame is one complete state: send all of its named grid functions together. Use increasing frame indices. To replace a mesh or begin a new sequence for the same identifier, call `sendMesh` again before sending frames. Re-register after reconnecting to a restarted viewer. The original `send(mesh, grid_function, metadata)` API remains available for single-field producers. A successful send means the packet was accepted by the local transport, not that the viewer has rendered or acknowledged it; `getLastError()` explains local send failures. Use one `Client` from one thread.
 
+### Describe frames: coordinates, values and tags
+
+Besides an index and a time, frames can carry values and tags a client declares up front. Register a `FrameSchema` once, before frames that use it:
+
+- **Coordinates** (`coordinate = true`, integer or real) are progress axes such as an iteration count or Newton step. The viewer labels frames by the schema's `primary` coordinate, filters by coordinate ranges, and plots tracks against any coordinate.
+- **Other values** (integer, real or text) are shown with each frame, for example a virial ratio or the solver in use, and numeric ones can be tracked across frames.
+- **Tags** mark kinds of frames, for example `iterate` and `converged`, so a client can send both intermediate steps and converged states and the viewer can show either.
+- `has_time = false` says simulation time means nothing, as for a static model being converged.
+
+```cpp
+RayFEM::FrameSchema schema;
+schema.values = {
+    {"iteration", RayFEM::ValueType::Integer, true, "", "Newton iteration"},
+    {"virial ratio", RayFEM::ValueType::Real, false, "", "2K/|W|"},
+    {"solver", RayFEM::ValueType::Text},
+};
+schema.tags = {{"iterate", "An intermediate iterate"}, {"converged", "The converged state"}};
+schema.has_time = false;        // a static solve: label frames by iteration
+schema.primary = "iteration";
+viewer.registerSchema(schema);
+
+RayFEM::FrameMetadata metadata;
+metadata.frame_index = n;
+metadata.values = {{"iteration", std::int64_t{n}}, {"virial ratio", ratio}, {"solver", std::string("Newton")}};
+metadata.tags = {converged ? "converged" : "iterate"};
+viewer.sendFrame(mesh_id, fields, metadata);
+```
+
+A frame may carry any subset of the declared values, each at most once; integers are accepted for real values. Undeclared names or tags, wrong types, non-finite numbers and text over 1024 bytes are refused by `sendFrame` with a reason in `getLastError()`. Registering again replaces the schema for later frames, and the client re-sends it with every `sendMesh`, so a restarted viewer recovers. Schemas allow up to 64 values and 64 tags. In the viewer, the funnel button on the timeline filters frames by tag and coordinate range (optionally discarding others as they arrive), and Analyze > Frame lists the shown frame's values and tags. `exampleClient --iterations 5` demonstrates time steps converged in five iterates; add `--static` for one static solve.
+
 ### Reuse geometry with displacement
 
 A displacement specifies offsets from the registered reference mesh, not offsets from the previous frame. Frames therefore do not accumulate drift when dropped or viewed out of order. Use the mesh geometry's own finite element space for one displacement per geometry DOF. RayFEM also accepts a different scalar-basis finite element space on the same base mesh, provided it has one vector component per spatial dimension; it evaluates that vector field at each rendered point. ND/RT directional fields are not valid pointwise displacements:

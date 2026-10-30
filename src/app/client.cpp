@@ -36,6 +36,8 @@ struct Options {
     bool quiet = false;
     bool text_fields = false;
     std::uint64_t mesh_id = 1;
+    int iterations = 0;         // frames per time step, each an iterate of a solve
+    bool static_model = false;  // time means nothing; frames are iterations of one solve
 };
 
 std::unique_ptr<mfem::Mesh> makeMesh(const Options& options) {
@@ -175,6 +177,21 @@ int stream(const Options& options) {
     };
     RayFEM::Client client(options.host, static_cast<std::size_t>(options.port));
     client.setBinaryFields(!options.text_fields);
+    // Declare what frames will carry: progress coordinates, values to show,
+    // and tags telling iterates from converged frames.
+    if (options.iterations > 0) {
+        RayFEM::FrameSchema schema;
+        schema.values = {
+            {"step", RayFEM::ValueType::Integer, true, "", "Time step being solved"},
+            {"iteration", RayFEM::ValueType::Integer, true, "", "Nonlinear iteration within the step"},
+            {"residual", RayFEM::ValueType::Real, false, "", "Normalized nonlinear residual"},
+            {"virial ratio", RayFEM::ValueType::Real, false, "", "2K/|W|; 1 in equilibrium"},
+            {"solver", RayFEM::ValueType::Text, false, "", "Nonlinear solver in use"}};
+        schema.tags = {{"iterate", "An intermediate nonlinear iterate"}, {"converged", "The converged state for this step"}};
+        schema.has_time = !options.static_model;
+        schema.primary = options.static_model ? "iteration" : "";
+        if (!client.registerSchema(schema)) throw std::runtime_error("Failed to register schema: " + client.getLastError());
+    }
     if (!client.sendMesh(options.mesh_id, *mesh)) {
         throw std::runtime_error("Failed to send mesh: " + client.getLastError());
     }
@@ -186,7 +203,10 @@ int stream(const Options& options) {
     const auto start = std::chrono::steady_clock::now();
     int sent = 0;
     for (int frame = 0; frame < options.frames; ++frame) {
-        const double time = frame * options.dt;
+        const int iterations = std::max(1, options.iterations);
+        const int step = options.static_model ? 0 : frame / iterations;
+        const int iteration = options.static_model ? frame + 1 : frame % iterations + 1;
+        const double time = options.iterations > 0 ? (options.static_model ? 0.0 : step * options.dt) : frame * options.dt;
         mfem::FunctionCoefficient temperature_coefficient(
             [time](const mfem::Vector& x) {
                 return x[0] + 2.0 * x[1] + (x.Size() == 3 ? 3.0 * x[2] : 0.0)
@@ -206,6 +226,13 @@ int stream(const Options& options) {
         std::snprintf(metadata.label, sizeof(metadata.label), "%s / %s / order %d",
                       options.mesh_file.empty() ? options.geometry.c_str() : "mesh file",
                       options.motion.c_str(), options.order);
+        if (options.iterations > 0) {
+            const double residual = 0.1*std::pow(0.08, iteration - 1);
+            const bool converged = options.static_model ? frame + 1 == options.frames : iteration == iterations;
+            metadata.values = {{"step", std::int64_t{step}}, {"iteration", std::int64_t{iteration}}, {"residual", residual},
+                               {"virial ratio", 1.0 + 0.6*residual*std::cos(0.7*step)}, {"solver", std::string("Newton")}};
+            metadata.tags = {converged ? "converged" : "iterate"};
+        }
         if (!client.sendFrame(options.mesh_id, fields, metadata,
                               options.no_displacement ? nullptr : &displacement)) {
             throw std::runtime_error("Failed to send frame " + std::to_string(frame)
@@ -263,6 +290,9 @@ int main(int argc, char** argv) {
     app.add_flag("--quiet", options.quiet, "Only print the stream summary");
     app.add_flag("--text-fields", options.text_fields, "Send fields as MFEM text (for viewers without binary fields)");
     app.add_option("--mesh-id", options.mesh_id, "Identifier used for mesh reuse");
+    app.add_option("--iterations", options.iterations, "Describe frames as iterates: this many per time step, the last tagged converged")
+        ->check(CLI::Range(0, 1000));
+    app.add_flag("--static", options.static_model, "With --iterations: one static solve, so time is not meaningful");
     CLI11_PARSE(app, argc, argv);
     if (fps->count() != 0) { options.interval = 1.0 / options.fps; }
     try {

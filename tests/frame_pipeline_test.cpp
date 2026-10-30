@@ -78,7 +78,16 @@ void Copies() {
     Check(copied_mesh.get() != mesh.get() && copied_mesh->GetNodes() &&
           copied_mesh->GetNodes()->FESpace()->GetMesh() == copied_mesh.get(), "Mesh copy owns its nodes");
     RayFEM::UI::SpaceCache spaces;
+    // What the client said about the frame travels with every copy.
+    auto schema = std::make_shared<RayFEM::FrameSchema>();
+    schema->values = {{"iteration", RayFEM::ValueType::Integer, true}};
+    schema->has_time = false;
+    first->schema = schema;
+    first->metadata.values = {{"iteration", int64_t{7}}};
+    first->metadata.tags = {"converged"};
     auto a = RayFEM::UI::CopyFrame(*first, copied_mesh, spaces);
+    Check(a->schema == schema && a->metadata.number("iteration") == 7.0 && a->metadata.hasTag("converged"),
+          "Copies keep the frame's schema, values and tags");
     auto b = RayFEM::UI::CopyFrame(*second, copied_mesh, spaces);
     for (const auto* frame : {a.get(), b.get()}) {
         Check(frame->mesh == copied_mesh, "Copied frame uses the destination mesh");

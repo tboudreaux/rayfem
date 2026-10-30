@@ -41,8 +41,13 @@ struct SerializedFrame {
     std::shared_ptr<SerializedMesh> mesh;
     std::vector<std::pair<std::string, std::string>> fields;
     std::string displacement;
+    std::string descriptor;
+    std::shared_ptr<const FrameSchema> schema;
     size_t queued_bytes = 0;
 };
+// The latest schema of a client session.
+struct SessionSchema { uint64_t revision = 0, last_use = 0; std::shared_ptr<const FrameSchema> schema; };
+constexpr size_t MaxSchemaSessions = 16;
 std::string meshKey(const Protocol::Header& header) {
     return std::to_string(header.session_id) + ":" + std::to_string(header.mesh_id);
 }
@@ -74,6 +79,12 @@ bool parseFrame(std::string_view payload, SerializedFrame& frame, std::string& e
         if (!Protocol::readInteger(payload, pos, 8, bytes) || !bytes || !readBlob(payload, pos, bytes, frame.displacement)) {
             error = "Truncated displacement field"; return false;
         }
+    }
+    // A descriptor (values and tags) takes the rest of the payload.
+    if (frame.header.flags & Protocol::HasDescriptor) {
+        frame.descriptor.assign(payload.substr(pos));
+        if (frame.descriptor.empty()) { error = "Missing frame descriptor"; return false; }
+        return true;
     }
     if (pos != payload.size()) { error = "Unexpected bytes after frame payload"; return false; }
     return true;
@@ -351,6 +362,7 @@ struct Server::Impl {
         }
         is_ready = true;
         std::unordered_map<std::string, std::shared_ptr<SerializedMesh>> meshes;
+        std::unordered_map<uint64_t, SessionSchema> schemas;
         size_t mesh_bytes = 0;
         uint64_t use_sequence = 0;
         while (running) {
@@ -374,6 +386,17 @@ struct Server::Impl {
                 std::string why;
                 if (!Protocol::decodeHeader(bytes, header, why)) { error(why); continue; }
                 const auto payload = bytes.substr(Protocol::HeaderBytes);
+                if (header.kind == Protocol::Kind::Schema) {
+                    auto schema = std::make_shared<FrameSchema>();
+                    if (!Protocol::decodeSchema(payload, *schema, why)) { error(why); continue; }
+                    auto& entry = schemas[header.session_id];
+                    if (entry.schema && header.mesh_revision <= entry.revision) continue;  // a repeat or an older one
+                    entry = {header.mesh_revision, ++use_sequence, std::move(schema)};
+                    while (schemas.size() > MaxSchemaSessions)
+                        schemas.erase(std::min_element(schemas.begin(), schemas.end(),
+                                                       [](const auto& a, const auto& b) { return a.second.last_use < b.second.last_use; }));
+                    continue;
+                }
                 const std::string key = meshKey(header);
                 auto found = meshes.find(key);
                 if (header.kind == Protocol::Kind::Mesh) {
@@ -409,6 +432,15 @@ struct Server::Impl {
                 frame.header = header;
                 frame.mesh = mesh;
                 if (!parseFrame(payload, frame, why)) { error(why); continue; }
+                if (const auto schema = schemas.find(header.session_id); schema != schemas.end()) {
+                    schema->second.last_use = ++use_sequence;
+                    frame.schema = schema->second.schema;
+                }
+                if (frame.header.flags & Protocol::HasDescriptor) {
+                    if (!frame.schema) { error("Frame values or tags arrived without a registered schema"); continue; }
+                    if (!Protocol::decodeDescriptor(*frame.schema, frame.descriptor, frame.header.metadata, why)) { error(why); continue; }
+                    frame.descriptor.clear();
+                }
                 mesh->last_use = ++use_sequence;
                 mesh->has_frame = true;
                 mesh->last_frame = header.metadata.frame_index;
@@ -476,6 +508,7 @@ std::vector<std::shared_ptr<RenderFrame>> Server::fetchFrames(size_t max_frames)
             }
             auto frame = std::make_shared<RenderFrame>();
             frame->metadata = serialized.header.metadata;
+            frame->schema = serialized.schema;
             frame->mesh_id = serialized.header.mesh_id;
             frame->session_id = serialized.header.session_id;
             frame->mesh_revision = serialized.header.mesh_revision;

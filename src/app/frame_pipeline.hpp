@@ -97,6 +97,7 @@ inline std::shared_ptr<RenderFrame> CopyFrame(const RenderFrame& source, std::sh
     if (!mesh) throw std::invalid_argument("Frame copy needs a destination mesh");
     auto frame = std::make_shared<RenderFrame>();
     frame->metadata = source.metadata;
+    frame->schema = source.schema;
     frame->mesh_id = source.mesh_id;
     frame->session_id = source.session_id;
     frame->mesh = std::move(mesh);

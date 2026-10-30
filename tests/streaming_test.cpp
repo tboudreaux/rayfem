@@ -1,3 +1,4 @@
+#include "libRayfem/frame/tracking.hpp"  // before zmq.hpp: its syslog macros clash with raylib
 #include "libRayfem/network/client.hpp"
 #include "libRayfem/network/server.hpp"
 #include "libRayfem/network/zmq.hpp"
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -56,6 +58,57 @@ std::string fieldPayload(const std::string& name, const std::string& data) {
     RayFEM::Protocol::appendInteger(payload, data.size(), 8);
     return payload + name + data;
 }
+RayFEM::FrameSchema iterationSchema() {
+    RayFEM::FrameSchema schema;
+    schema.values = {{"iteration", RayFEM::ValueType::Integer, true, "", "Newton iteration"},
+                     {"virial ratio", RayFEM::ValueType::Real, false, "", "2K/|W|"},
+                     {"radius", RayFEM::ValueType::Real, true, "R_sun", ""},
+                     {"solver", RayFEM::ValueType::Text, false, "", ""}};
+    schema.tags = {{"iterate", "Intermediate"}, {"converged", "Converged state"}};
+    schema.has_time = false;
+    schema.primary = "iteration";
+    return schema;
+}
+void testSchemaEncoding() {
+    using namespace RayFEM;
+    const auto schema = iterationSchema();
+    std::string error;
+    require(Protocol::validateSchema(schema, error), error);
+    FrameSchema decoded;
+    require(Protocol::decodeSchema(Protocol::encodeSchema(schema), decoded, error), error);
+    require(decoded.values.size() == 4 && decoded.tags.size() == 2 && !decoded.has_time && decoded.primary == "iteration" &&
+            decoded.values[2].unit == "R_sun" && decoded.values[0].coordinate && decoded.values[3].type == ValueType::Text &&
+            decoded.tags[1].description == "Converged state", "Schema round trip");
+    auto broken = schema;
+    broken.values.push_back({"label", ValueType::Text, true});
+    require(!Protocol::validateSchema(broken, error), "Text coordinates are rejected");
+    broken = schema; broken.values.push_back(broken.values.front());
+    require(!Protocol::validateSchema(broken, error), "Duplicate value names are rejected");
+    broken = schema; broken.primary = "virial ratio";
+    require(!Protocol::validateSchema(broken, error), "A primary that is not a coordinate is rejected");
+    std::string truncated = Protocol::encodeSchema(schema);
+    truncated.pop_back();
+    require(!Protocol::decodeSchema(truncated, decoded, error), "Truncated schemas are rejected");
+    // Descriptors: integers widen to reals; types, names and tags are checked.
+    FrameMetadata metadata;
+    metadata.values = {{"virial ratio", int64_t{1}}, {"iteration", int64_t{4}}, {"solver", std::string("Newton")}};
+    metadata.tags = {"converged"};
+    std::string bytes;
+    require(Protocol::encodeDescriptor(schema, metadata, bytes, error), error);
+    FrameMetadata back;
+    require(Protocol::decodeDescriptor(schema, bytes, back, error), error);
+    require(back.number("virial ratio") == 1.0 && std::holds_alternative<double>(*back.find("virial ratio")) &&
+            std::get<int64_t>(*back.find("iteration")) == 4 && std::get<std::string>(*back.find("solver")) == "Newton" &&
+            back.hasTag("converged") && !back.hasTag("iterate") && !back.find("radius"), "Descriptor round trip");
+    for (const auto& bad : {FrameMetadata{0, 0, "", {{"unknown", 1.0}}, {}}, FrameMetadata{0, 0, "", {{"iteration", 1.5}}, {}},
+                            FrameMetadata{0, 0, "", {{"solver", 2.0}}, {}}, FrameMetadata{0, 0, "", {{"radius", std::nan("")}}, {}},
+                            FrameMetadata{0, 0, "", {}, {"diverged"}}, FrameMetadata{0, 0, "", {}, {"iterate", "iterate"}}}) {
+        std::string ignored;
+        require(!Protocol::encodeDescriptor(schema, bad, ignored, error), "Invalid frame values or tags are rejected");
+    }
+    bytes.push_back('x');
+    require(!Protocol::decodeDescriptor(schema, bytes, back, error), "Trailing descriptor bytes are rejected");
+}
 void testWireHeader() {
     RayFEM::Protocol::Header expected;
     expected.session_id = 0x1122334455667788ULL;
@@ -83,6 +136,7 @@ void testWireHeader() {
 int main(int argc, char** argv) {
     try {
         testWireHeader();
+        testSchemaEncoding();
         const size_t port = 20000 + (getpid() % 20000);
         RayFEM::Server server("127.0.0.1", port);
         waitFor([&] { return server.ready() || server.getErrorCount() > 0; }, "Server startup timed out");
@@ -385,6 +439,76 @@ int main(int argc, char** argv) {
             auto resumed = receive(server, 1);
             require(resumed.front()->metadata.frame_index == 3 && resumed.front()->fields.size() == fields.size(),
                     "Frames after resuming did not decode with the mesh registered while paused");
+        }
+        {
+            // Described frames: schema, values and tags arrive with the frame.
+            server.fetchFrames(64);
+            RayFEM::Client described("127.0.0.1", port);
+            RayFEM::FrameMetadata early;
+            early.values = {{"iteration", int64_t{1}}};
+            require(described.sendMesh(30, mesh), described.getLastError());
+            require(!described.sendFrame(30, fields, early), "Values without a schema are refused by the client");
+            require(described.registerSchema(iterationSchema()), described.getLastError());
+            require(described.sendMesh(30, mesh), described.getLastError());
+            RayFEM::FrameMetadata wrong;
+            wrong.values = {{"virial ratio", std::string("high")}};
+            require(!described.sendFrame(30, fields, wrong), "A wrongly typed value is refused by the client");
+            for (uint32_t index = 0; index < 3; ++index) {
+                RayFEM::FrameMetadata metadata;
+                metadata.frame_index = index;
+                metadata.values = {{"iteration", int64_t(index + 1)}, {"virial ratio", 1.0 + 0.1/(index + 1)}, {"radius", 0.5 + index}};
+                metadata.tags = {index == 2 ? "converged" : "iterate"};
+                require(described.sendFrame(30, fields, metadata), described.getLastError());
+            }
+            auto received = receive(server, 3);
+            const auto& last = received.back();
+            require(last->schema && !last->schema->has_time && last->schema->primary == "iteration", "Frames carry their schema");
+            require(last->metadata.number("iteration") == 3.0 && last->metadata.hasTag("converged") &&
+                    std::abs(*last->metadata.number("virial ratio") - (1.0 + 0.1/3)) < 1e-15 && !last->metadata.find("solver"),
+                    "Frame values and tags arrive decoded");
+            require(received.front()->metadata.hasTag("iterate") && received.front()->fields.size() == fields.size(),
+                    "Described frames keep their fields");
+            // Tracking a frame value records the frame's coordinates too.
+            RayFEM::TrackingRequest request;
+            request.field_name = "virial ratio";
+            request.kind = RayFEM::MeasurementKind::FrameValue;
+            RayFEM::FrameTracker tracker(request);
+            for (auto& frame : received) tracker.append(*frame);
+            require(tracker.samples().size() == 3 && tracker.samples().back().valid &&
+                    std::abs(tracker.samples().back().value - (1.0 + 0.1/3)) < 1e-15 &&
+                    tracker.samples().back().coordinate("iteration") == 3.0 && tracker.samples().back().coordinate("radius") == 2.5 &&
+                    !tracker.samples().back().coordinate("virial ratio"), "Frame values are tracked with their coordinates");
+            // Registering again replaces the schema for later frames.
+            auto revised = iterationSchema();
+            revised.tags.push_back({"restart", ""});
+            require(described.registerSchema(revised), described.getLastError());
+            RayFEM::FrameMetadata restarted;
+            restarted.frame_index = 3;
+            restarted.tags = {"restart"};
+            require(described.sendFrame(30, fields, restarted), described.getLastError());
+            require(receive(server, 1).front()->metadata.hasTag("restart"), "A revised schema applies to later frames");
+
+            // A descriptor from a session with no schema is rejected.
+            RayFEM::SocketPtr raw(zsock_new(ZMQ_PUSH));
+            zsock_set_linger(raw, 0);
+            zsock_set_sndtimeo(raw, 1000);
+            require(zsock_connect(raw, "tcp://127.0.0.1:%d", int(port)) == 0, "Could not connect descriptor sender");
+            RayFEM::Protocol::Header header;
+            header.session_id = 4242; header.mesh_id = 1; header.mesh_revision = 1;
+            header.kind = RayFEM::Protocol::Kind::Mesh;
+            std::ostringstream mesh_data; mesh_data << std::setprecision(17); mesh.Print(mesh_data);
+            sendRaw(raw, header, mesh_data.str());
+            std::ostringstream space; space << std::setprecision(17); scalar_space.Save(space);
+            std::vector<double> values(scalar.Size(), 1.0);
+            std::string descriptor;
+            RayFEM::Protocol::appendInteger(descriptor, 0, 2);
+            RayFEM::Protocol::appendInteger(descriptor, 0, 2);
+            header.kind = RayFEM::Protocol::Kind::Frame; header.field_count = 1;
+            header.flags = RayFEM::Protocol::BinaryFields | RayFEM::Protocol::HasDescriptor;
+            const size_t errors = server.getErrorCount();
+            sendRaw(raw, header, fieldPayload("u", binaryField(space.str(), values.size(), values)) + descriptor);
+            waitFor([&] { return server.getErrorCount() > errors; }, "A descriptor without a schema was accepted");
+            require(server.getLastError().find("schema") != std::string::npos, "The schema error is reported");
         }
         std::cout << "Streaming checks passed: curvilinear geometry, five FE spaces, shared meshes, atomic fields, displacement, burst queue, malformed input, restart, NURBS, and 148225-DOF multi-field frames.\n";
         return 0;

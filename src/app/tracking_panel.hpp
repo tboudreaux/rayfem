@@ -30,6 +30,13 @@ class TrackingPanel {
     };
 public:
     bool HasTracks() const {return !tracks.empty();}
+    // Track a numeric value the client sends with each frame.
+    void AddFrameValue(const std::shared_ptr<RayFEM::RenderFrame>& frame,const std::string& name,
+                       const std::deque<std::shared_ptr<RayFEM::RenderFrame>>& history) {
+        RayFEM::TrackingRequest request;
+        request.field_name=name;request.kind=RayFEM::MeasurementKind::FrameValue;
+        Add(frame,request,history);
+    }
     bool TakePlotRequest() {const bool result=plotRequested;plotRequested=false;return result;}
 
     // Colors of every tracked DOF on this frame, matching DofColor per index.
@@ -195,8 +202,24 @@ public:
 
     void DrawPlot(ImVec2 size,const std::shared_ptr<RayFEM::RenderFrame>& current) const {
         if(tracks.empty()) {ImGui::TextDisabled("Use Pick DOF, or add a track in Analyze.");return;}
-        ImGui::SetNextItemWidth(115);
-        ImGui::Combo("##track_axis",&axis,"Time\0Frame\0");
+        // Axes: time, frame index, and the coordinates the current frame's
+        // schema declares. Without meaningful time the primary coordinate
+        // is the default.
+        std::vector<std::string> axes{"Time","Frame"};
+        if(current && current->schema) for(const auto& v:current->schema->values) if(v.coordinate) axes.push_back(v.name);
+        if(axisName.empty() || std::find(axes.begin(),axes.end(),axisName)==axes.end())
+            axisName=current && current->schema && !current->schema->has_time?
+                (current->schema->primary.empty()?"Frame":current->schema->primary):"Time";
+        ImGui::SetNextItemWidth(std::max(115.f,ImGui::CalcTextSize(axisName.c_str()).x+ImGui::GetFrameHeight()*2));
+        if(ImGui::BeginCombo("##track_axis",axisName.c_str())) {
+            for(const auto& a:axes) if(ImGui::Selectable(a.c_str(),a==axisName)) axisName=a;
+            ImGui::EndCombo();
+        }
+        auto xOf=[&](const RayFEM::MeasurementSample& s)->std::optional<double> {
+            if(axisName=="Time") return s.time;
+            if(axisName=="Frame") return double(s.frame);
+            return s.coordinate(axisName);
+        };
         size_t pending=0;for(const auto& t:tracks) pending+=t.pending.size();
         char details[80];
         if(pending)std::snprintf(details,sizeof(details),"%zu samples pending",pending);
@@ -211,7 +234,9 @@ public:
             uint64_t previousSession=0,previousMesh=0,previousRevision=0,previousFrame=0;bool first=true;
             double previousX=0;
             for(const auto& s:t.tracker.samples()) {
-                const double x=axis==0?s.time:s.frame;
+                const auto at=xOf(s);
+                if(!at) {if(!points.empty())points.push_back({points.back().x,0,false});first=true;continue;}  // a frame without this coordinate breaks the line
+                const double x=*at;
                 if(!first && (s.session_id!=previousSession || s.mesh_id!=previousMesh || s.mesh_revision!=previousRevision ||
                              static_cast<uint64_t>(s.frame)!=previousFrame+1 || x<previousX))
                     points.push_back({x,0,false});
@@ -221,8 +246,14 @@ public:
             series.push_back({t.label.c_str(),points,RayFEM::UI::PlotColor(t.id-1)});
         }
         RayFEM::UI::PlotOptions options;
-        options.x_label=axis==0?"Simulation time":"Frame";options.y_label="Value";
-        if(current) options.cursor_x=axis==0?current->metadata.sim_time:current->metadata.frame_index;
+        std::string xLabel=axisName=="Time"?"Simulation time":axisName;
+        if(current && current->schema) if(const auto* field=current->schema->find(axisName); field && !field->unit.empty()) xLabel+=" ("+field->unit+")";
+        options.x_label=xLabel.c_str();options.y_label="Value";
+        if(current) {
+            if(axisName=="Time") options.cursor_x=current->metadata.sim_time;
+            else if(axisName=="Frame") options.cursor_x=current->metadata.frame_index;
+            else if(const auto v=current->metadata.number(axisName)) options.cursor_x=*v;
+        }
         RayFEM::UI::PlotLines("##time_traces",series,size,options);
     }
 private:
@@ -235,7 +266,10 @@ private:
             if(request.kind==RayFEM::MeasurementKind::DofCoefficient)
                 label="DOF "+std::to_string(request.dof)+" ["+std::to_string(request.component)+"]";
             else label=RayFEM::MeasurementName(request.kind);
-            label+=" / "+request.field_name;
+            if(request.kind==RayFEM::MeasurementKind::FrameValue) {
+                label=request.field_name;
+                if(frame->schema) if(const auto* field=frame->schema->find(request.field_name); field && !field->unit.empty()) label+=" ("+field->unit+")";
+            } else label+=" / "+request.field_name;
             Track t(nextId++,std::move(label),request);
             if(request.kind==RayFEM::MeasurementKind::DofCoefficient) t.tracker.bindDof(*frame);
             t.session=frame->session_id;t.mesh=frame->mesh_id;t.revision=frame->mesh_revision;
@@ -259,7 +293,7 @@ private:
     std::optional<RayFEM::ElementSelectionScope> elementScope;
     size_t nextId=1,expired=0,nextTrack=0;
     int kind=0,dof=0,coefficientComponent=0;
-    mutable int axis=0;
+    mutable std::string axisName;
     bool plotRequested=false;
     float probe[3]={0,0,0};
     std::string message;

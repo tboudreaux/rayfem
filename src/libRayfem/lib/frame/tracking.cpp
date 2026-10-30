@@ -171,6 +171,7 @@ const char* MeasurementName(MeasurementKind kind) {
         case MeasurementKind::Integral: return "Physical integral";
         case MeasurementKind::L2Norm: return "L2 norm";
         case MeasurementKind::PointProbe: return "Point probe";
+        case MeasurementKind::FrameValue: return "Frame value";
     }
     return "Unknown measurement";
 }
@@ -246,11 +247,19 @@ bool FrameTracker::append(RenderFrame& frame) {
     MeasurementSample sample;
     sample.session_id = frame.session_id; sample.mesh_id = frame.mesh_id; sample.mesh_revision = frame.mesh_revision;
     sample.frame = frame.metadata.frame_index; sample.time = frame.metadata.sim_time;
+    if (frame.schema)
+        for (const auto& field : frame.schema->values)
+            if (field.coordinate) if (const auto v = frame.metadata.number(field.name)) sample.coordinates.emplace_back(field.name, *v);
     sample.excluded_materials = request_.excluded_materials;
     if (!request_.element_scope || *request_.element_scope == ElementSelectionScope{frame.session_id,frame.mesh_id,frame.mesh_revision})
         sample.excluded_elements = request_.excluded_elements;
     try {
         if (!std::isfinite(sample.time)) { throw std::invalid_argument("Frame simulation time is non-finite"); }
+        if (request_.kind == MeasurementKind::FrameValue) {
+            const auto value = frame.metadata.number(request_.field_name);
+            if (!value) { throw std::runtime_error("Frame has no numeric value named " + request_.field_name); }
+            sample.value = *value;
+        } else {
         const auto& record = FieldRecord(frame, request_.field_name);
         auto& field = *record.gf;
         ExcludeUnsupportedMaterials(record, *frame.mesh, sample.excluded_materials);
@@ -263,6 +272,7 @@ bool FrameTracker::append(RenderFrame& frame) {
             }
             sample.value = result[0].value;
         } else { Aggregate(sample, frame, field, request_); }
+        }
         if (!std::isfinite(sample.value)) { throw std::runtime_error("Measurement is non-finite"); }
         sample.valid = true;
     } catch (const std::exception& error) {
@@ -296,7 +306,7 @@ void FrameTracker::setExcludedElements(std::vector<int> excluded_elements,
 
 void ExportTrackingCSV(std::ostream& stream, const FrameTracker& tracker) {
     const auto& request = tracker.request();
-    stream << "field,kind,dof,component,view,displacement_enabled,displacement_scale,quadrature_order,algorithm,probe_x,probe_y,probe_z,session,mesh,revision,frame,time,valid,value,measure,error,excluded_materials,excluded_elements\r\n";
+    stream << "field,kind,dof,component,view,displacement_enabled,displacement_scale,quadrature_order,algorithm,probe_x,probe_y,probe_z,session,mesh,revision,frame,time,valid,value,measure,error,excluded_materials,excluded_elements,coordinates\r\n";
     std::ostringstream row;
     row.imbue(std::locale::classic()); row << std::setprecision(std::numeric_limits<double>::max_digits10);
     for (const auto& sample : tracker.samples()) {
@@ -304,6 +314,9 @@ void ExportTrackingCSV(std::ostream& stream, const FrameTracker& tracker) {
         for (int id : sample.excluded_materials) { if (!excluded.empty()) excluded+=';'; excluded+=std::to_string(id); }
         std::string elements;
         for (int id : sample.excluded_elements) { if (!elements.empty()) elements+=';'; elements+=std::to_string(id); }
+        std::ostringstream coordinates;
+        coordinates.imbue(std::locale::classic()); coordinates << std::setprecision(std::numeric_limits<double>::max_digits10);
+        for (const auto& [name, value] : sample.coordinates) coordinates << (coordinates.tellp() > 0 ? ";" : "") << name << '=' << value;
         row.str(""); row.clear();
         row << Quoted(request.field_name) << ',' << Quoted(MeasurementName(request.kind)) << ','
             << request.dof << ',' << request.component << ',' << ViewName(request.view) << ','
@@ -313,7 +326,7 @@ void ExportTrackingCSV(std::ostream& stream, const FrameTracker& tracker) {
             << sample.session_id << ',' << sample.mesh_id << ',' << sample.mesh_revision << ','
             << sample.frame << ',' << sample.time << ',' << (sample.valid ? 1 : 0) << ','
             << (sample.valid ? sample.value : std::numeric_limits<double>::quiet_NaN()) << ','
-            << sample.measure << ',' << Quoted(sample.error) << ',' << Quoted(excluded) << ',' << Quoted(elements) << "\r\n";
+            << sample.measure << ',' << Quoted(sample.error) << ',' << Quoted(excluded) << ',' << Quoted(elements) << ',' << Quoted(coordinates.str()) << "\r\n";
         stream << row.str();
     }
     if (!stream) { throw std::runtime_error("Could not write tracking CSV"); }

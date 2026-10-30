@@ -44,6 +44,7 @@
 #include "ray_placement.hpp"
 #include "widgets.hpp"
 #include "figure_export.hpp"
+#include "frame_info.hpp"
 #include "element_picker.hpp"
 #include "element_panel.hpp"
 #include "mouse_modifiers.hpp"
@@ -361,6 +362,7 @@ private:
     void Ingest() {
         const auto previous = Current();
         for (auto& frame : pipeline.TakeFrames()) {
+            if (frameFilter.discard && frameFilter.Active() && !frameFilter.Matches(*frame)) {++discardedFrames;continue;}
             tracking.Observe(frame);
             frames.push_back(std::move(frame));
         }
@@ -378,13 +380,40 @@ private:
             frames.erase(frames.begin() + victim);
             if (static_cast<int>(victim) < selected) --selected;
         }
-        if (follow && !frames.empty()) selected = static_cast<int>(frames.size()) - 1;
-        else if (!frames.empty()) selected = std::clamp(selected, 0, static_cast<int>(frames.size()) - 1);
+        // Follow, play and keep the view on frames the filter shows.
+        const auto shown = Shown();
+        if (follow && !frames.empty()) selected = shown.empty() ? static_cast<int>(frames.size()) - 1 : shown.back();
+        else if (!frames.empty()) {
+            selected = std::clamp(selected, 0, static_cast<int>(frames.size()) - 1);
+            if (!shown.empty() && !std::binary_search(shown.begin(), shown.end(), selected)) {
+                const auto next = std::lower_bound(shown.begin(), shown.end(), selected);
+                selected = next == shown.begin() ? *next : *std::prev(next);
+            }
+        }
         if (playing && !frames.empty() && GetTime() - lastPlay >= 1.0 / playbackFps) {
-            selected = (selected + 1) % frames.size();
+            selected = StepShown(1, true);
             lastPlay = GetTime();
         }
         if (Current() != previous) error.clear();
+    }
+
+    // Indices of retained frames the timeline filter shows, in order.
+    std::vector<int> Shown() const {
+        std::vector<int> shown;
+        for (int i = 0; i < static_cast<int>(frames.size()); ++i)
+            if (!frameFilter.Active() || frameFilter.Matches(*frames[i])) shown.push_back(i);
+        return shown;
+    }
+    // The next (direction 1) or previous (-1) shown frame from the current one.
+    int StepShown(int direction, bool wrap) const {
+        const auto shown = Shown();
+        if (shown.empty()) return selected;
+        if (direction > 0) {
+            const auto next = std::upper_bound(shown.begin(), shown.end(), selected);
+            return next != shown.end() ? *next : wrap ? shown.front() : selected;
+        }
+        const auto next = std::lower_bound(shown.begin(), shown.end(), selected);
+        return next != shown.begin() ? *std::prev(next) : wrap ? shown.back() : selected;
     }
 
     size_t HistoryBytes() const {
@@ -829,6 +858,9 @@ private:
         switch(inspectorPage) {
         case 0: DrawControls(); break;
         case 1:
+            RayFEM::UI::DrawFrameDetails(frame,[&](const std::string& name) {
+                tracking.AddFrameValue(frame,name,frames);showPlots=true;plotTab=1;
+            });
             profiles.Controls(frame,gf,fieldName,RenderSettings(frame));
             surfaceTrace.Controls(frame,gf,fieldName,RenderSettings(frame));
             tracking.Controls(frame,fieldName,RenderSettings(frame),frames);
@@ -1265,14 +1297,13 @@ private:
     static constexpr const char* previousFrameLabel=ICON_FA_BACKWARD_STEP "###previous";
     static constexpr const char* nextFrameLabel=ICON_FA_FORWARD_STEP "###next";
     static constexpr const char* liveLabel=ICON_FA_TOWER_BROADCAST "  Live###live";
+    static constexpr const char* filterLabel=ICON_FA_FILTER "###frame_filter";
     static constexpr float playButtonWidth=92;
 
     std::string TimelineLabel() const {
         auto frame=Current();
         if(!frame) return {};
-        char label[96];
-        std::snprintf(label,sizeof(label),"Frame %u  ·  t %.5g",frame->metadata.frame_index,frame->metadata.sim_time);
-        return label;
+        return RayFEM::UI::FrameCaption(*frame);
     }
 
     static constexpr float timelinePadding=10;
@@ -1289,7 +1320,7 @@ private:
     float TimelineControlsWidth() const {
         const auto& style=ImGui::GetStyle();
         auto button=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+2*style.FramePadding.x;};
-        return button(previousFrameLabel)+button(nextFrameLabel)+playButtonWidth+12+100+button(liveLabel)+3*style.ItemSpacing.x;
+        return button(previousFrameLabel)+button(nextFrameLabel)+playButtonWidth+12+100+button(liveLabel)+button(filterLabel)+4*style.ItemSpacing.x;
     }
 
     // The timeline as a card: a transport group, speed and Live, the current
@@ -1315,13 +1346,13 @@ private:
         ImGui::PushStyleColor(ImGuiCol_Button,IM_COL32(0,0,0,0));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{2,style.ItemSpacing.y});
         ImGui::SetCursorScreenPos({group.x+4,group.y});
-        if(ImGui::Button(previousFrameLabel)) {if(selected>0)--selected;follow=false;playing=false;}
+        if(ImGui::Button(previousFrameLabel)) {selected=StepShown(-1,false);follow=false;playing=false;}
         Tip("Previous frame (Left arrow over the viewport)");ImGui::SameLine();
         if(RayFEM::UI::ToggleButton(playing?ICON_FA_PAUSE "  Pause###play":ICON_FA_PLAY "  Play###play",playing,{playButtonWidth,0}))
             {playing=!playing;follow=false;lastPlay=GetTime();}
         Tip(playing?"Pause playback":"Play retained frames in a loop");
         ImGui::SameLine();
-        if(ImGui::Button(nextFrameLabel)) {if(selected+1<static_cast<int>(frames.size()))++selected;follow=false;playing=false;}
+        if(ImGui::Button(nextFrameLabel)) {selected=StepShown(1,false);follow=false;playing=false;}
         Tip("Next frame (Right arrow over the viewport)");
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
@@ -1331,6 +1362,15 @@ private:
         Tip("Playback speed");ImGui::SameLine();
         if(RayFEM::UI::ToggleButton(liveLabel,follow)) {follow=!follow;playing=false;}
         Tip(follow?"Following incoming frames. Click to stay on the current frame.":"Jump to and follow the newest frame");
+        const auto shown=Shown();
+        ImGui::SameLine();
+        if(RayFEM::UI::ToggleButton(filterLabel,frameFilter.Active())) ImGui::OpenPopup("Frame filter");
+        Tip(frameFilter.Active()?"Filtering frames by tag or coordinate. Click to change.":"Show only frames with chosen tags or coordinate values");
+        if(ImGui::BeginPopup("Frame filter")) {
+            RayFEM::UI::DrawFrameFilter(frameFilter,frames,shown.size());
+            if(discardedFrames) ImGui::TextDisabled("%zu frames discarded on arrival",discardedFrames);
+            ImGui::EndPopup();
+        }
         if(Current()) {
             // The current frame, right-aligned on the same row when it fits.
             const auto label=TimelineLabel();
@@ -1338,19 +1378,27 @@ private:
             const float rightEdge=ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x;
             if(RayFEM::UI::NextInlineItem(labelWidth+style.ItemSpacing.x)) ImGui::SameLine(std::max(ImGui::GetCursorPosX(),rightEdge-labelWidth));
             ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",label.c_str());
-            char retained[48];
-            std::snprintf(retained,sizeof(retained),"%d / %d",selected+1,static_cast<int>(frames.size()));
+            // The scrubber runs over the frames the filter shows.
+            const auto at=std::lower_bound(shown.begin(),shown.end(),selected);
+            int position=at!=shown.end() && *at==selected?static_cast<int>(at-shown.begin()):0;
+            const int count=std::max<int>(1,static_cast<int>(shown.size()));
+            char retained[64];
+            if(frameFilter.Active())std::snprintf(retained,sizeof(retained),"%d / %d of %d",position+1,static_cast<int>(shown.size()),static_cast<int>(frames.size()));
+            else std::snprintf(retained,sizeof(retained),"%d / %d",selected+1,static_cast<int>(frames.size()));
             const float countWidth=ImGui::CalcTextSize(retained).x;
             const float trackWidth=std::max(40.0f,ImGui::GetContentRegionAvail().x-countWidth-style.ItemSpacing.x*2);
             auto describe=[&](int index) {
-                const auto& metadata=frames[std::clamp(index,0,static_cast<int>(frames.size())-1)]->metadata;
-                char text[96];std::snprintf(text,sizeof(text),"Frame %u  ·  t %.6g",metadata.frame_index,metadata.sim_time);
-                return std::string(text);
+                const int frame=shown.empty()?selected:shown[std::clamp(index,0,static_cast<int>(shown.size())-1)];
+                return RayFEM::UI::FrameCaption(*frames[std::clamp(frame,0,static_cast<int>(frames.size())-1)]);
             };
-            if(RayFEM::UI::Scrubber("##frame",&selected,static_cast<int>(frames.size()),trackWidth,describe)) {follow=false;playing=false;}
+            if(RayFEM::UI::Scrubber("##frame",&position,count,trackWidth,describe)) {
+                if(!shown.empty())selected=shown[std::clamp(position,0,static_cast<int>(shown.size())-1)];
+                follow=false;playing=false;
+            }
             ImGui::SameLine(0,style.ItemSpacing.x*2);
             ImGui::AlignTextToFramePadding();ImGui::TextDisabled("%s",retained);
-            if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))ImGui::SetTooltip("Position among the retained frames");
+            if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                ImGui::SetTooltip(frameFilter.Active()?"Position among the frames the filter shows, and all retained frames":"Position among the retained frames");
         }
         ImGui::EndDisabled();
         ImGui::EndChild();
@@ -1492,8 +1540,8 @@ private:
         if(elementPress)RayFEM::PrepareCameraOrbitGesture(input,cameraDrag,elementPressPosition,elementPressMoved);
         if(RayFEM::UpdateCameraController(camera,cameraDrag,input,radius))cameraAdjusted=true;
         if (hovered && !ImGui::IsAnyItemActive()) {
-            if (IsKeyPressed(KEY_LEFT) && selected>0) {--selected;follow=false;playing=false;}
-            if (IsKeyPressed(KEY_RIGHT) && selected+1<static_cast<int>(frames.size())) {++selected;follow=false;playing=false;}
+            if (IsKeyPressed(KEY_LEFT)) {selected=StepShown(-1,false);follow=false;playing=false;}
+            if (IsKeyPressed(KEY_RIGHT)) {selected=StepShown(1,false);follow=false;playing=false;}
         }
         auto* active=ActiveView();
         if(elementPress && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
@@ -1939,6 +1987,8 @@ private:
     bool surfaceBuilding=false;
     double buildingSince=-1;
     bool showContours=false;
+    RayFEM::UI::FrameFilter frameFilter;
+    std::size_t discardedFrames=0;
     int contourCount=12;
     bool profileClipping=false,savedClip=false;
     Vector3 savedSlicePoint{},savedSliceNormal{1,0,0};

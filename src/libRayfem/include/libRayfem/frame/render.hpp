@@ -44,6 +44,9 @@ inline void ExcludeUnsupportedMaterials(const FrameField& field, const mfem::Mes
 // owns its fields; GPU resources belong to the viewer and never to this object.
 struct RenderFrame {
     FrameMetadata metadata;
+    // The sender's schema: what metadata.values and tags mean. Null when the
+    // client registered none.
+    std::shared_ptr<const FrameSchema> schema;
     uint64_t mesh_id = 0;
     uint64_t session_id = 0;
     uint64_t mesh_revision = 0;

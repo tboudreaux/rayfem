@@ -186,7 +186,7 @@ void RestrictedArchiveFields() {
     std::ostringstream exported;ExportTrackingCSV(exported,evolving);
     std::istringstream rows(exported.str());std::string row;
     std::getline(rows,row);std::getline(rows,row);
-    Check(row.ends_with(",\"17\",\"\"\r"),"CSV must record restricted saved-field support even without a user exclusion");
+    Check(row.ends_with(",\"17\",\"\",\"\"\r"),"CSV must record restricted saved-field support even without a user exclusion");
     std::getline(rows,row);
     Check(row.ends_with(",\"\",\"\"\r"),"CSV must record broader support independently in the next frame");
     evolving.setExcludedMaterials({17});evolving.append(*wider);

@@ -162,7 +162,7 @@ void trackingScope(){
     tracker.append(frame);near(tracker.samples().back().value,4,1e-10,"Scoped hidden-element integral");
     ++frame.mesh_revision;tracker.append(frame);near(tracker.samples().back().value,104,1e-10,"Cell indices must not leak into another mesh revision");
     check(tracker.samples().back().excluded_elements.empty(),"Export metadata uses effective frame selection");
-    std::ostringstream csv;ExportTrackingCSV(csv,tracker);check(csv.str().find("excluded_elements")!=std::string::npos&&csv.str().find(",\"1\"\r\n")!=std::string::npos,"Tracking CSV records element exclusions");
+    std::ostringstream csv;ExportTrackingCSV(csv,tracker);check(csv.str().find("excluded_elements")!=std::string::npos&&csv.str().find(",\"1\",\"\"\r\n")!=std::string::npos,"Tracking CSV records element exclusions");
 }
 void invalidSelections(){
     auto frame=fixture();auto& mesh=*frame.mesh;auto& scalar=*frame.fields[0].gf;

@@ -8,7 +8,9 @@
 
 namespace RayFEM {
 
-enum class MeasurementKind { DofCoefficient, Minimum, Maximum, Mean, Integral, L2Norm, PointProbe };
+// FrameValue reads a numeric value the client sent with each frame (named
+// by field_name); it needs no field data.
+enum class MeasurementKind { DofCoefficient, Minimum, Maximum, Mean, Integral, L2Norm, PointProbe, FrameValue };
 const char* MeasurementName(MeasurementKind kind);
 
 struct ElementSelectionScope {
@@ -50,6 +52,13 @@ struct MeasurementSample {
     // outside the field's intrinsic support in this particular frame.
     std::vector<int> excluded_materials;
     std::vector<int> excluded_elements;
+    // The frame's numeric coordinates (from its schema), for plotting
+    // against an iteration count or other progress axis.
+    std::vector<std::pair<std::string, double>> coordinates;
+    std::optional<double> coordinate(std::string_view name) const {
+        for (const auto& [n, v] : coordinates) if (n == name) return v;
+        return std::nullopt;
+    }
 };
 
 class FrameTracker {
