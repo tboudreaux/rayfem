@@ -49,4 +49,18 @@ struct ShutdownResult {
 // remote endpoint, incompatible viewer, or shutdown timeout returns Failed.
 ShutdownResult shutdown(const WindowParams& parameters = {});
 
+struct ViewerStats {
+    size_t received = 0;  // frames fully decoded
+    size_t errors = 0;    // packets or frames rejected
+    size_t dropped = 0;   // frames dropped from a full queue
+    size_t skipped = 0;   // frames skipped while receiving was paused
+    std::string error;    // why the viewer could not be asked
+    explicit operator bool() const { return error.empty(); }
+};
+
+// Counters of the viewer at host/port/control_port since it started. The
+// stream is one-way, so this is how a sender can confirm its frames arrived.
+// Other WindowParams members except timeout_ms are ignored.
+ViewerStats stats(const WindowParams& parameters = {});
+
 } // namespace RayFEM

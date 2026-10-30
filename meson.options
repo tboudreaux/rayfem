@@ -16,3 +16,7 @@ option('serif_source_dir', type: 'string', value: '',
        description: 'Existing SERiF source directory (no configure or build is performed)')
 option('serif_build_dir', type: 'string', value: '',
        description: 'Existing SERiF build directory; defaults to SOURCE/build')
+option('python', type: 'feature', value: 'disabled',
+       description: 'Build the Python extension module and install the rayfem package')
+option('bundle', type: 'boolean', value: false,
+       description: 'Self-contained build for Python wheels: static third-party libraries, no C++ install, and the viewer inside the rayfem package')

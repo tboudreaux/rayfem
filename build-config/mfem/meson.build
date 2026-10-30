@@ -14,7 +14,10 @@ endif
 mfem_dep = disabler()
 mfem_provider = ''
 register_mfem_override = false
-if meson.is_subproject() or (mfem_prefix == '' and get_option('mfem_provider') == 'external')
+if bundle and get_option('mfem_provider') == 'external'
+    error('-Dbundle=true builds its own static MFEM; drop mfem_provider=external')
+endif
+if not bundle and (meson.is_subproject() or (mfem_prefix == '' and get_option('mfem_provider') == 'external'))
     mfem_dep = dependency('mfem', required: false, allow_fallback: false)
     if mfem_dep.found()
         mfem_provider = 'parent or installed dependency'
@@ -27,7 +30,7 @@ if meson.is_subproject() or (mfem_prefix == '' and get_option('mfem_provider') =
     endif
 endif
 
-if not mfem_dep.found() and get_option('mfem_provider') != 'bundled'
+if not bundle and not mfem_dep.found() and get_option('mfem_provider') != 'bundled'
     mfem_cmake_args = []
     if mfem_prefix != ''
         mfem_cmake_args = ['-DMFEM_DIR=' + mfem_prefix / 'lib/cmake/mfem']
@@ -66,24 +69,27 @@ if not mfem_dep.found()
     mfem_cmake_options.add_cmake_defines({
         'MFEM_ENABLE_EXAMPLES': 'OFF', 'MFEM_ENABLE_TESTING': 'OFF',
         'MFEM_ENABLE_MINIAPPS': 'OFF', 'MFEM_USE_BENCHMARK': 'OFF',
-        'BUILD_SHARED_LIBS': 'ON', 'MFEM_USE_EXCEPTIONS': 'ON',
+        'BUILD_SHARED_LIBS': bundle ? 'OFF' : 'ON', 'MFEM_USE_EXCEPTIONS': 'ON',
+        'CMAKE_POSITION_INDEPENDENT_CODE': 'ON',
     })
     mfem_cmake_options.append_compile_args('cpp', cpp_args)
-    mfem_cmake_options.set_install(true)
+    mfem_cmake_options.set_install(not bundle)
     mfem_sp = cmake.subproject('mfem', options: mfem_cmake_options)
     mfem_dep = mfem_sp.dependency('mfem')
     register_mfem_override = true
-    mfem_provider = 'bundled shared MFEM'
+    mfem_provider = bundle ? 'bundled static MFEM' : 'bundled shared MFEM'
     mfem_cmake_file = fs.read(meson.project_source_root() / 'subprojects/mfem/CMakeLists.txt')
     mfem_version = mfem_cmake_file.split('set(${PROJECT_NAME}_VERSION ')[1].split(')')[0].strip().strip('"')
-    pkg.generate(mfem_sp.target('mfem'), name: 'RayFEM bundled MFEM',
-                 filebase: 'rayfem-mfem', version: mfem_version, subdirs: '.')
+    if not bundle
+        pkg.generate(mfem_sp.target('mfem'), name: 'RayFEM bundled MFEM',
+                     filebase: 'rayfem-mfem', version: mfem_version, subdirs: '.')
+    endif
     mfem_build_dir = meson.project_build_root() / 'subprojects/mfem/__CMake_build'
 endif
 
 mfem_pkg_dep = mfem_dep
 mfem_exported_flags = []
-if mfem_provider != 'bundled shared MFEM'
+if not mfem_provider.startswith('bundled')
     mfem_runtime_prefix = mfem_prefix
     if mfem_runtime_prefix == ''
         mfem_runtime_prefix = mfem_dep.get_variable(internal: 'prefix', pkgconfig: 'prefix', default_value: '')

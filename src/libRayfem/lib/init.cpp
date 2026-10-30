@@ -71,6 +71,21 @@ Reply Probe(const std::string& host,int stream_port,int control_port,int timeout
     return Reply::Other;
 }
 
+// Ask the control endpoint for one reply line; nullopt when nothing answers.
+std::optional<std::string> Ask(const std::string& host,int control_port,const std::string& request,int timeout_ms) {
+    SocketPtr socket(zsock_new(ZMQ_REQ));
+    if (!socket) return std::nullopt;
+    zsock_set_linger(socket,0);
+    zsock_set_sndtimeo(socket,timeout_ms);
+    zsock_set_rcvtimeo(socket,timeout_ms);
+    zsock_set_maxmsgsize(socket,256);
+    zsock_set_ipv6(socket,1);
+    if(zsock_connect(socket,"%s",Address(host,control_port).c_str())<0 || zstr_send(socket,request.c_str())<0) return std::nullopt;
+    FramePtr frame(zframe_recv(socket));
+    if(!frame || zsock_rcvmore(socket)) return std::nullopt;
+    return std::string(reinterpret_cast<const char*>(zframe_data(frame)),zframe_size(frame));
+}
+
 bool IsLocal(const std::string& host) {
     return host=="localhost" || host=="127.0.0.1" || host=="::1";
 }
@@ -348,4 +363,20 @@ ShutdownResult shutdown(const WindowParams& parameters) {
     } catch (const std::exception& error) { result.error = error.what(); }
     return result;
 }
+ViewerStats stats(const WindowParams& parameters) {
+    ViewerStats result;
+    if (parameters.port < 1 || parameters.port > 65535) { result.error = "Invalid viewer port."; return result; }
+    const int control_port = parameters.control_port ? parameters.control_port : parameters.port + 1;
+    if (control_port < 1 || control_port > 65535) { result.error = "Invalid viewer control port."; return result; }
+    const std::string host = parameters.host == "localhost" ? "127.0.0.1" : parameters.host;
+    const std::string prefix = "RAYFEM_STATS 1 " + std::to_string(parameters.port) + " " + Nonce();
+    const auto reply = Ask(host, control_port, prefix, std::max(1, parameters.timeout_ms));
+    if (!reply) { result.error = "No RayFEM viewer answered at the requested endpoint."; return result; }
+    std::istringstream fields(reply->starts_with(prefix + " ") ? reply->substr(prefix.size() + 1) : std::string());
+    std::string extra;
+    if (!(fields >> result.received >> result.errors >> result.dropped >> result.skipped) || (fields >> extra))
+        result.error = "The viewer did not report statistics; it may be an older version.";
+    return result;
+}
+
 } // namespace RayFEM

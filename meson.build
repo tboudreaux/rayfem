@@ -16,6 +16,12 @@ build_viewer = get_option('build_viewer').enabled() or (get_option('build_viewer
 build_examples = get_option('build_examples').enabled() or (get_option('build_examples').auto() and not meson.is_subproject())
 build_tests = get_option('build_tests').enabled() or (get_option('build_tests').auto() and not meson.is_subproject())
 build_ui = build_viewer or build_tests or get_option('glvis_experiment')
+# A wheel build links everything statically and installs only the Python
+# package (extension and viewer), so the wheel runs without other libraries.
+bundle = get_option('bundle')
+if bundle and get_option('default_library') != 'static'
+    error('-Dbundle=true needs -Ddefault_library=static so the viewer and extension are self-contained')
+endif
 
 add_project_arguments('-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0', '-Wno-unused-parameter', language: 'cpp')
 
@@ -34,17 +40,24 @@ if host_machine.system() == 'darwin' and cxx.get_id() == 'clang'
 endif
 
 subdir('build-config')
-python_build = import('python').find_installation()
-header_install_args = [
-    '--includedir', get_option('includedir'),
-    '--raylib-build', fs.parent(raylib_subproject.target('raylib').full_path()) / '__CMake_build',
-    '--czmq-build', fs.parent(czmq_subproject.target('czmq').full_path()) / '__CMake_build',
-]
-if mfem_provider == 'bundled shared MFEM'
-    header_install_args += ['--mfem-build', fs.parent(mfem_sp.target('mfem').full_path()) / '__CMake_build']
+python_build = import('python').find_installation(pure: false)
+if not bundle
+    header_install_args = [
+        '--includedir', get_option('includedir'),
+        '--raylib-build', fs.parent(raylib_subproject.target('raylib').full_path()) / '__CMake_build',
+        '--czmq-build', fs.parent(czmq_subproject.target('czmq').full_path()) / '__CMake_build',
+    ]
+    if mfem_provider == 'bundled shared MFEM'
+        header_install_args += ['--mfem-build', fs.parent(mfem_sp.target('mfem').full_path()) / '__CMake_build']
+    endif
 endif
-meson.add_install_script(python_build, files('tools/install_dependency_headers.py'), header_install_args)
+if not bundle
+    meson.add_install_script(python_build, files('tools/install_dependency_headers.py'), header_install_args)
+endif
 subdir('src')
+if get_option('python').enabled()
+    subdir('python')
+endif
 if build_tests
     subdir('tests')
 endif
@@ -59,6 +72,7 @@ if host_machine.system() != 'windows'
         endif
     endforeach
 endif
+if not bundle
 pkg.generate(
   libRayFem,
   name: 'rayfem',
@@ -72,7 +86,9 @@ pkg.generate(
   extra_cflags: ['-std=c++23'] + mfem_exported_flags,
   variables: {'viewer': get_option('prefix') / get_option('bindir') / 'RayFEM'},
 )
+endif
 
 summary({'MFEM provider': mfem_provider, 'SERiF archive reader': serif_enabled,
-         'viewer': build_viewer, 'examples': build_examples, 'tests': build_tests},
+         'viewer': build_viewer, 'examples': build_examples, 'tests': build_tests,
+         'Python package': get_option('python').enabled(), 'wheel bundle': bundle},
         section: 'RayFEM', bool_yn: true)

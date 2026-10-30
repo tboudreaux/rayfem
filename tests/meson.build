@@ -43,6 +43,15 @@ figure_test = executable('figure_test', 'figure_test.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 test('figure', figure_test, timeout: 120)
 
+# A 2D heat equation streamed to a viewer that the rayfem Python package
+# starts; run python/tests/test_diffusion_stream.py with this program.
+diffusion_stream = executable('diffusion_stream', 'diffusion_stream.cpp',
+    dependencies: [rayfem_dep], link_args: link_args)
+
+# Prints what the server decodes; Python tests use it to check sends end to end.
+stream_probe = executable('stream_probe', 'stream_probe.cpp',
+    dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
+
 # Requires a desktop graphics session; run explicitly (see README).
 executable('viewer_test', 'viewer_test.cpp', dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 executable('curvature_viewer_test', 'curvature_viewer_test.cpp',

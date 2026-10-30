@@ -33,11 +33,14 @@ if build_viewer
         viewer_objcpp_args = ['-std=c++23']
         viewer_sources += files('app/mouse_modifiers.mm')
     endif
+    # A bundle ships the viewer inside the Python package (rayfem/bin), linked
+    # statically so it needs no libraries beyond the system's.
     rayfem_viewer = executable('RayFEM', viewer_sources,
         dependencies: [app_dependencies, rayfem_dep],
         cpp_args: cpp_args, c_args: c_args, objcpp_args: viewer_objcpp_args, link_args: link_args,
         build_rpath: ':'.join(serif_runtime_dirs + runtime_dirs),
-        install: true, install_rpath: viewer_install_rpath)
+        install: true, install_rpath: bundle ? '' : viewer_install_rpath,
+        install_dir: bundle ? python_build.get_install_dir() / 'rayfem' / 'bin' : get_option('bindir'))
 endif
 
 if build_examples

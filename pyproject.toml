@@ -1,0 +1,66 @@
+[build-system]
+requires = ["meson-python>=0.17", "meson>=1.3", "ninja", "cmake>=3.24", "nanobind>=2.4"]
+build-backend = "mesonpy"
+
+[project]
+name = "rayfem"
+dynamic = ["version"]
+description = "Stream MFEM finite element meshes and fields to the RayFEM viewer"
+readme = "python/README.md"
+requires-python = ">=3.12"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: C++",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
+[project.optional-dependencies]
+numpy = ["numpy"]
+test = ["numpy"]
+
+[tool.meson-python]
+# One wheel per platform for CPython 3.12 and later.
+limited-api = true
+
+[tool.meson-python.args]
+# A self-contained build: static MFEM, raylib, CZMQ and libzmq; the viewer is
+# installed inside the package, and nothing else from the C++ project is.
+setup = [
+    "-Dpython=enabled",
+    "-Dbundle=true",
+    "-Ddefault_library=static",
+    "-Dbuild_viewer=enabled",
+    "-Dbuild_tests=disabled",
+    "-Dbuild_examples=disabled",
+    "-Dserif=disabled",
+    "-Dmfem_provider=bundled",
+    "-Dbuildtype=release",
+    "-Db_ndebug=if-release",
+]
+install = ["--skip-subprojects"]
+
+[tool.cibuildwheel]
+# abi3 wheels: building for 3.12 covers every later CPython.
+build = "cp312-*"
+skip = ["*-musllinux_*", "*-win*"]
+build-frontend = "build"
+test-requires = ["numpy"]
+test-command = "python {project}/python/tests/test_wheel.py"
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+# raylib's X11 headers, and GCC 14 for C++23. The viewer loads X11 extension
+# libraries and OpenGL at run time, as desktop Linux provides them.
+before-all = [
+    "dnf install -y libX11-devel libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel mesa-libGL-devel gcc-toolset-14",
+]
+environment = { PATH = "/opt/rh/gcc-toolset-14/root/usr/bin:$PATH" }
+
+[tool.cibuildwheel.macos]
+# libc++'s C++23 support needs macOS 13.3 or later.
+environment = { MACOSX_DEPLOYMENT_TARGET = "13.3" }

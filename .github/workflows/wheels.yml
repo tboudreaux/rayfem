@@ -1,0 +1,37 @@
+# Self-contained abi3 wheels (CPython 3.12 and later) for macOS and Linux on
+# x86_64 and arm64. Each runner builds its native architecture; cibuildwheel
+# runs python/tests/test_wheel.py against every wheel it builds.
+name: wheels
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["pyproject.toml", "python/**", "src/libRayfem/**", "build-config/**", "subprojects/*.wrap", ".github/workflows/wheels.yml"]
+
+jobs:
+  wheels:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-13, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v2.23.3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz

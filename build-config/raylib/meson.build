@@ -1,8 +1,9 @@
 raylib_opts = cmake.subproject_options()
-raylib_opts.set_install(true)
+raylib_opts.set_install(not bundle)
 raylib_opts.add_cmake_defines({
       'BUILD_EXAMPLES': 'OFF',
-      'BUILD_SHARED_LIBS': 'ON',
+      'BUILD_SHARED_LIBS': bundle ? 'OFF' : 'ON',
+      'CMAKE_POSITION_INDEPENDENT_CODE': 'ON',
   })
 if cc.get_id() == 'emscripten'
     raylib_opts.add_cmake_defines({
@@ -18,8 +19,10 @@ raylib_dep = raylib_subproject.dependency('raylib')
 dependencies += raylib_dep
 raylib_header = fs.read(meson.project_source_root() / 'subprojects/raylib/src/raylib.h')
 raylib_version = raylib_header.split('#define RAYLIB_VERSION ')[1].split('\n')[0].strip().strip('"')
-pkg.generate(raylib_subproject.target('raylib'), name: 'RayFEM raylib',
-             filebase: 'rayfem-raylib', version: raylib_version, subdirs: '.')
+if not bundle
+    pkg.generate(raylib_subproject.target('raylib'), name: 'RayFEM raylib',
+                 filebase: 'rayfem-raylib', version: raylib_version, subdirs: '.')
+endif
 
 # General configuration
 if host_machine.system() == 'windows'

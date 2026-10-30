@@ -217,6 +217,31 @@ The example streams one immutable reference mesh, then **Temperature**, **Mesh v
 
 This is conservative diffusion, `partial_t T + div(w*T) = diffusivity*Laplacian(T)`, with zero diffusive flux at the moving boundary. Here `T` represents heat per unit area: expansion dilutes it and contraction concentrates it while total heat remains constant. Each step checks the linear residual, total heat, and domain area; fixed-mesh runs also check energy decay. `--dt` controls simulation time, while `--fps` controls streaming pace. Use `--help` for mesh order/resolution, time-step, diffusivity, and pulsation settings.
 
+## Python
+
+`pip install rayfem` installs a wheel that includes the viewer; nothing is
+compiled. Wheels use the stable ABI (one per platform for CPython 3.12 and
+later) and cover macOS and Linux on x86_64 and arm64. See
+[python/README.md](python/README.md) for the API.
+
+The Python package shares no C++ types with other extensions: meshes travel
+as MFEM mesh text and fields as a space header plus a float64 array, so
+PyMFEM, SERiF or plain NumPy (`rayfem.mesh`) can all send to the viewer
+whatever MFEM build they use. In C++, `RayFEM::StreamClient`
+(`libRayfem/network/stream.hpp`) is the same MFEM-free client;
+`RayFEM::Client` serializes MFEM objects and sends through it.
+
+Build wheels with [cibuildwheel](https://cibuildwheel.pypa.io) (configured in
+`pyproject.toml`; `.github/workflows/wheels.yml` runs it on each platform), or
+locally with `python -m build --wheel`. Both use `-Dbundle=true`, which builds
+MFEM, raylib, CZMQ and libzmq statically from source. For development,
+`-Dpython=enabled` adds the extension to a normal build; it needs nanobind in
+the configuring Python. `python/tests/test_wheel.py` checks an installed
+package, and `python/tests/test_diffusion_stream.py BUILD/tests/diffusion_stream`
+starts a viewer from Python, streams a 2D heat-equation solve to it from C++
+(`tests/diffusion_stream.cpp`), and confirms every frame arrived with
+`rayfem.stats()`.
+
 ## Start a viewer from C++
 
 Call `RayFEM::init` before creating a streaming client. It returns once a compatible viewer reports that its network listeners and window are ready, or when startup fails or times out.

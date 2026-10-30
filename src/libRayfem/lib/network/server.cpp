@@ -7,6 +7,11 @@
 #include <bit>
 #include <cctype>
 #include <charconv>
+#include <clocale>
+#include <cstdlib>
+#if defined(__APPLE__)
+#include <xlocale.h>
+#endif
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -202,6 +207,22 @@ std::shared_ptr<DecodedSpace> loadSpace(SpaceCache& cache, const std::shared_ptr
     return result;
 }
 
+// One locale-independent double. Apple's libc++ provides floating-point
+// std::from_chars only from macOS 26, so wheels for older macOS use strtod_l
+// with the C locale; it stops at the first character that is not part of
+// the number, and the field text ends with the string's terminator.
+const char* parseDouble(const char* first, const char* last, double& value) {
+#if defined(__APPLE__)
+    static const locale_t c_locale = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+    char* stop = nullptr;
+    value = strtod_l(first, &stop, c_locale);
+    return stop == first || stop > last ? nullptr : stop;
+#else
+    const auto parsed = std::from_chars(first, last, value);
+    return parsed.ec == std::errc{} ? parsed.ptr : nullptr;
+#endif
+}
+
 void readValues(std::string_view text, mfem::GridFunction& field) {
     const char* cursor = text.data();
     const char* const end = text.data() + text.size();
@@ -209,11 +230,11 @@ void readValues(std::string_view text, mfem::GridFunction& field) {
     for (int i = 0; i < field.Size(); ++i) {
         skip();
         double value = 0;
-        const auto parsed = std::from_chars(cursor, end, value);
-        if (parsed.ec != std::errc{} || !std::isfinite(value))
+        const char* next = cursor < end ? parseDouble(cursor, end, value) : nullptr;
+        if (!next || !std::isfinite(value))
             throw std::runtime_error("Truncated or non-finite grid function");
         field(i) = value;
-        cursor = parsed.ptr;
+        cursor = next;
     }
     skip();
     if (cursor != end) throw std::runtime_error("Unexpected data after grid function");
@@ -317,16 +338,22 @@ struct Server::Impl {
             int version = 0;
             size_t requested_port = 0;
             if ((input >> command >> version >> requested_port >> nonce) && !(input >> extra) &&
-                (command == "RAYFEM_PROBE" || command == "RAYFEM_SHUTDOWN") &&
+                (command == "RAYFEM_PROBE" || command == "RAYFEM_SHUTDOWN" || command == "RAYFEM_STATS") &&
                 version == 1 && requested_port == stream_port &&
                 !nonce.empty() && nonce.size() <= 64 &&
                 std::all_of(nonce.begin(), nonce.end(), [](unsigned char c) {
                     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
                 })) {
                 shutdown = command == "RAYFEM_SHUTDOWN";
-                response = std::string(shutdown ? "RAYFEM_STOPPING 1 " :
-                    (viewer_ready ? "RAYFEM_READY 1 " : "RAYFEM_STARTING 1 "))
-                    + std::to_string(stream_port) + " " + nonce;
+                if (command == "RAYFEM_STATS")
+                    // Decoded frames and rejected, dropped and skipped packets,
+                    // so a sender on the one-way stream can confirm delivery.
+                    response = "RAYFEM_STATS 1 " + std::to_string(stream_port) + " " + nonce + " " + std::to_string(received.load()) +
+                        " " + std::to_string(errors.load()) + " " + std::to_string(dropped.load()) + " " + std::to_string(skipped.load());
+                else
+                    response = std::string(shutdown ? "RAYFEM_STOPPING 1 " :
+                        (viewer_ready ? "RAYFEM_READY 1 " : "RAYFEM_STARTING 1 "))
+                        + std::to_string(stream_port) + " " + nonce;
             }
         }
         if (zstr_send(socket, response.c_str()) == 0 && shutdown) shutdown_requested = true;
