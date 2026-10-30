@@ -1,4 +1,4 @@
-# Need a desktop graphics session: built, but not run by meson test (see README).
+# Need a desktop graphics session: built, but not run by meson test (see docs/building.md).
 
 executable('viewer_test', 'viewer_test.cpp', dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 

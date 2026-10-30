@@ -10,7 +10,7 @@ diffusion_stream = executable('diffusion_stream', 'diffusion_stream.cpp',
 stream_probe = executable('stream_probe', 'stream_probe.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 
-# Needs fixtures from generate_stroid_fixtures.py (see README).
+# Needs fixtures from generate_stroid_fixtures.py (see docs/building.md).
 executable('stroid_flow_test', 'stroid_flow_test.cpp', dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 
 # Starts, reuses and shuts down a real viewer window; pass its path.

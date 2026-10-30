@@ -1,7 +1,7 @@
 include_dirs = include_directories('include')
-# The MFEM-free core: viewer launch and shutdown, and streaming of serialized
-# meshes and fields. The Python extension links only this.
-client_sources = files('lib/init.cpp', 'lib/network/stream.cpp')
+# The MFEM-free core (lib/core): viewer launch and shutdown, and streaming of
+# serialized meshes and fields. The Python extension links only this.
+client_sources = files('lib/core/init.cpp', 'lib/core/stream.cpp')
 rayfem_client = static_library('rayfem_client', client_sources,
     include_directories: include_dirs, dependencies: [czmq_dep, zmq_dep], cpp_args: cpp_args, pic: true)
 rayfem_client_dep = declare_dependency(include_directories: include_dirs, link_with: rayfem_client,

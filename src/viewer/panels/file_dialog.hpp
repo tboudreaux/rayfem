@@ -36,7 +36,7 @@ public:
             ImGui::TextWrapped("This build does not include SERiF archive support.");
             ImGui::Spacing();
             ImGui::TextWrapped("Configure RayFEM with an existing SERiF library to enable .serif files. "
-                               "See the optional SERiF section in the README.");
+                               "See the optional SERiF section in docs/building.md.");
             if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
             return result;
