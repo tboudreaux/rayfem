@@ -146,7 +146,7 @@ def check_build(build, environment):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mfem-prefix", type=Path, required=True)
-    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--serif-source", type=Path)
     parser.add_argument("--serif-build", type=Path)
     parser.add_argument("--cc")

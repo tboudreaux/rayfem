@@ -1,9 +1,9 @@
 """A viewer started from Python receives a 2D diffusion solve streamed from C++.
 
-    python python/tests/test_diffusion_stream.py BUILD/tests/diffusion_stream
+    python python/tests/test_diffusion_stream.py BUILD/tests/integration/diffusion_stream
 
 rayfem.init() starts the viewer bundled with the installed package; the
-MFEM program (tests/diffusion_stream.cpp) solves the heat equation, checks
+MFEM program (tests/integration/diffusion_stream.cpp) solves the heat equation, checks
 its error against the exact solution, and streams every step. The viewer's
 counters (rayfem.stats) then confirm every frame was decoded and none was
 rejected. Needs a display for the viewer window.

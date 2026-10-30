@@ -53,15 +53,15 @@ The **Scale** selector offers **Linear** (default), **Signed log**, and **ZScale
 
 ZScale takes up to 1,000 deterministic samples spread throughout the selected field volume, including clipped regions. This samples reference-cell lattices and FE nodes; it approximates the distribution and is not weighted by physical volume. Material exclusions still apply. Flow uses its whole-volume magnitude distribution; 2D heatmaps use their valid plane samples. Scalar profile and tracking axes remain unchanged. Library consumers can set `RenderOptions::color_scale`, or use `ResolveColorScale`, `ColorScaleFraction`, and `ColorScaleValue` from `libRayfem/mesh/color_scale.hpp`. To reproduce the viewer's volume-based limits, request `FieldRangeOptions::distribution_samples`, resolve the mapping from the resulting `FieldRange::samples`, then call `ApplyFieldColorRange(surface, mapping)`.
 
-CPU checks (geometry, volume color ranges, streaming, viewer startup, clipping, profiles, camera controls, animated displacement, frame tracking, chart helpers and themes, surface traces, material selection, vector flow, archive loading, and fixed/pulsating diffusion) run through `meson test`. For a local ZeroMQ prefix, also set `PKG_CONFIG_PATH="$PWD/.rayfem-deps/lib/pkgconfig"` and `CMAKE_PREFIX_PATH="$PWD/.rayfem-deps"` on rebuild commands so automatic CMake regeneration finds its headers. Camera tests cover continuous orbit/pan input, drag ownership, release, and zoom limits without a graphics window. Separate graphics integration executables need an active graphical session and OpenGL context:
+Tests are grouped by what they need: `tests/library` (libRayfem), `tests/network` (streaming, launch and shutdown) and `tests/viewer` (the viewer's headers) run without a window; `tests/graphics` needs a desktop session; `tests/integration` holds programs and scripts run against a viewer, an installed package or a parent project. CPU checks (geometry, volume color ranges, streaming, viewer startup, clipping, profiles, camera controls, animated displacement, frame tracking, chart helpers and themes, surface traces, material selection, vector flow, archive loading, and fixed/pulsating diffusion) run through `meson test`. For a local ZeroMQ prefix, also set `PKG_CONFIG_PATH="$PWD/.rayfem-deps/lib/pkgconfig"` and `CMAKE_PREFIX_PATH="$PWD/.rayfem-deps"` on rebuild commands so automatic CMake regeneration finds its headers. Camera tests cover continuous orbit/pan input, drag ownership, release, and zoom limits without a graphics window. Separate graphics integration executables need an active graphical session and OpenGL context:
 
 ```sh
-./build-rayfem/tests/viewer_test build-rayfem/test-output subprojects/mfem/data
+./build-rayfem/tests/graphics/viewer_test build-rayfem/test-output subprojects/mfem/data
 # Append --visible to watch the same checks in a window.
-./build-rayfem/tests/flow_viewer_test build-rayfem/test-output \
+./build-rayfem/tests/graphics/flow_viewer_test build-rayfem/test-output \
   subprojects/mfem/data/ball-nurbs.mesh
 # Additional mesh filenames may follow, including the Stroid fixtures below.
-./build-rayfem/tests/imgui_backend_test build-rayfem/test-output/large-ui-list.png
+./build-rayfem/tests/graphics/imgui_backend_test build-rayfem/test-output/large-ui-list.png
 ```
 
 It renders 168 frames across curved quadrilateral, triangular, hexahedral, tetrahedral, and three original NURBS meshes, checks framebuffer changes when switching fields or applying displacement, and saves 48 screenshots. The checks include ND curl, RT divergence, vector arrows, DOF markers, original element boundaries, both cutting algorithms, whole-element cuts, and repeated GPU resource cleanup. An additional sphere-to-ellipsoid-to-sphere cycle checks fixed-camera images for exact NURBS and order-5 H1 geometry. The displacement suite separately streams 132 states across both geometries and both vector orderings, verifying immutable reference nodes, independent snapshots, analytic axes, and scrambled replay. This exercises the rendering pipeline; interactive controls and hover behavior are separate UI interactions.
@@ -95,7 +95,7 @@ g++ --std=c++23 $(pkg-config --cflags librayfem) test.cpp \
 
 Shared libraries are the default. Runtime search paths are included for the installation and its configured external libraries, so running a consumer does not require a `DYLD_LIBRARY_PATH` or `LD_LIBRARY_PATH` workaround. Use a compiler and C++ runtime compatible with the MFEM/SERiF installation you link.
 
-`python3 tests/package_smoke.py /your/install/prefix` compiles and runs a separate C++23 consumer with both command layouts and no library-path overrides.
+`python3 tests/integration/package_smoke.py /your/install/prefix` compiles and runs a separate C++23 consumer with both command layouts and no library-path overrides.
 
 ## Share MFEM with another project
 
@@ -120,7 +120,7 @@ executable('simulation', 'simulation.cpp', dependencies: [serif_dep, rayfem_dep]
 
 Place this repository at `subprojects/rayfem`, or supply it through the parent's existing dependency arrangement. RayFEM does not fetch or build SERiF. Viewer, examples, and tests default to enabled for standalone builds and disabled for subproject builds; their `build_viewer`, `build_examples`, and `build_tests` feature options can override that choice.
 
-`tests/parent_integration.py --mfem-prefix /existing/mfem-prefix` creates an independent temporary parent project and verifies that a parent-created field evaluates correctly through RayFEM with exactly one MFEM library loaded. Add `--serif-source /existing/serif --serif-build /existing/serif/build` to also exercise a parent-provided SERiF dependency.
+`tests/integration/parent_integration.py --mfem-prefix /existing/mfem-prefix` creates an independent temporary parent project and verifies that a parent-created field evaluates correctly through RayFEM with exactly one MFEM library loaded. Add `--serif-source /existing/serif --serif-build /existing/serif/build` to also exercise a parent-provided SERiF dependency.
 
 ## Optional SERiF archives
 
@@ -237,9 +237,9 @@ locally with `python -m build --wheel`. Both use `-Dbundle=true`, which builds
 MFEM, raylib, CZMQ and libzmq statically from source. For development,
 `-Dpython=enabled` adds the extension to a normal build; it needs nanobind in
 the configuring Python. `python/tests/test_wheel.py` checks an installed
-package, and `python/tests/test_diffusion_stream.py BUILD/tests/diffusion_stream`
+package, and `python/tests/test_diffusion_stream.py BUILD/tests/integration/diffusion_stream`
 starts a viewer from Python, streams a 2D heat-equation solve to it from C++
-(`tests/diffusion_stream.cpp`), and confirms every frame arrived with
+(`tests/integration/diffusion_stream.cpp`), and confirms every frame arrived with
 `rayfem.stats()`.
 
 ## Start a viewer from C++
@@ -381,7 +381,7 @@ Automatic previews update at most four times per second with a short computation
 
 Streamlines currently require full-dimensional 2D or 3D meshes. Arrow sampling also supports 2D surfaces embedded in 3D; streamlines on those surfaces need a separate surface-constrained integrator.
 
-The explicit desktop test `build-rayfem/tests/streamline_renderer_test build-rayfem/test-output/streamline-pulses` checks moving highlights, joins, thickness, clipping phase, depth occlusion, and near-camera rendering with framebuffer readback. `build-rayfem/tests/flow_viewer_test build-rayfem/test-output/flow-pulses subprojects/mfem/data/disc-nurbs.mesh subprojects/mfem/data/ball-nurbs.mesh` checks field sampling and rendering together in both themes. These tests require a desktop graphics session; the ordinary Meson suite also checks pulse math and direct seed counts without a window.
+The explicit desktop test `build-rayfem/tests/graphics/streamline_renderer_test build-rayfem/test-output/streamline-pulses` checks moving highlights, joins, thickness, clipping phase, depth occlusion, and near-camera rendering with framebuffer readback. `build-rayfem/tests/graphics/flow_viewer_test build-rayfem/test-output/flow-pulses subprojects/mfem/data/disc-nurbs.mesh subprojects/mfem/data/ball-nurbs.mesh` checks field sampling and rendering together in both themes. These tests require a desktop graphics session; the ordinary Meson suite also checks pulse math and direct seed counts without a window.
 
 ## Frame tracking and in-window plots
 
@@ -399,7 +399,7 @@ The collapsible **Selection statistics** pane reports physical area/volume, cent
 
 Hidden cells are omitted from rendering, DOF/vector overlays, field ranges, profiles, surface traces, and tracking. Changing visibility marks profile snapshots stale and rebuilds tracks from retained frames. CSV exports record excluded element IDs. The library equivalents are `RenderOptions::excluded_elements` and scoped `TrackingRequest::excluded_elements`; indices remain those of the original registered mesh.
 
-Surface construction batches element field evaluation and reuses polynomial reference bases within each build, with bounded memory and direct MFEM evaluation for rational NURBS bases. Element outlines are cached in GPU buffers, including their camera-dependent depth offset. Color-map, scale, and range changes update only the color buffer instead of rebuilding the mesh. View caches remain bounded. For repeatable performance measurements, run `build-rayfem/tests/render_benchmark`; the explicit desktop test `build-rayfem/tests/edge_renderer_test build-rayfem/test-output` checks cached outlines and compares their CPU submission cost with the former per-edge path. `build-rayfem/tests/viewer_lifecycle_test /absolute/path/to/RayFEM` exercises the real window's startup, reuse, shutdown, and restart on ports 5696–5697.
+Surface construction batches element field evaluation and reuses polynomial reference bases within each build, with bounded memory and direct MFEM evaluation for rational NURBS bases. Element outlines are cached in GPU buffers, including their camera-dependent depth offset. Color-map, scale, and range changes update only the color buffer instead of rebuilding the mesh. View caches remain bounded. For repeatable performance measurements, run `build-rayfem/tests/graphics/render_benchmark`; the explicit desktop test `build-rayfem/tests/graphics/edge_renderer_test build-rayfem/test-output` checks cached outlines and compares their CPU submission cost with the former per-edge path. `build-rayfem/tests/integration/viewer_lifecycle_test /absolute/path/to/RayFEM` exercises the real window's startup, reuse, shutdown, and restart on ports 5696–5697.
 
 Click **Pick DOF**, then click a marker on the mesh. RayFEM adds a colored coefficient trace to **Tracks**, backfills the retained history, and samples incoming frames. The selected marker uses its trace color. Alternatively, enter a scalar-space DOF index and coefficient component under **Analyze → Frame tracking**. `DofToVDof` maps vector ordering; ND/RT traces represent oriented functional coefficients, and NURBS traces represent control coefficients. They do not become physical point values merely because their markers move with displacement.
 
@@ -477,8 +477,8 @@ The receiver accepts polynomial field orders up to 32 and NURBS degrees up to 10
 An existing [Stroid](https://github.com/4D-STAR/stroid) executable can generate real order-five, cube-projected spheroid fixtures for RayFEM. Stroid is optional; the generator writes its configurations, meshes, and provenance into the build directory and does not modify the Stroid checkout.
 
 ```sh
-python3 tests/generate_stroid_fixtures.py /path/to/stroid/build/tools/stroid
-./build-rayfem/tests/stroid_flow_test \
+python3 tests/integration/generate_stroid_fixtures.py /path/to/stroid/build/tools/stroid
+./build-rayfem/tests/integration/stroid_flow_test \
   build-rayfem/test-output/stroid-order5.mesh \
   build-rayfem/test-output/stroid-order5-nc.mesh \
   build-rayfem/test-output --graphics
