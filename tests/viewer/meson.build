@@ -52,3 +52,10 @@ test('spin', spin_test, timeout: 30)
 movie_test = executable('movie_test', 'movie_test.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 test('movie', movie_test, timeout: 60)
+
+retention_test = executable('retention_test', 'retention_test.cpp', dependencies: viewer_headers_dep)
+test('retention', retention_test, timeout: 30)
+
+widgets_test = executable('widgets_test', 'widgets_test.cpp',
+    dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
+test('widgets', widgets_test, timeout: 30)

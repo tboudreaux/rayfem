@@ -24,7 +24,7 @@ void CameraPath() {
     Camera3D side{{18, 1, 0}, {2, 1, 0}, {0, 1, 0}, 30, CAMERA_PERSPECTIVE};
     std::vector<Keyframe> keys{KeyframeFrom(side, 10), KeyframeFrom(front, 0)};
     SortKeyframes(keys);
-    Check(keys.front().position == 0 && keys.back().position == 10, "Keyframes sort by position");
+    Check(keys.front().time == 0 && keys.back().time == 10, "Keyframes sort by time");
     Near(CameraAt(keys, -5, Easing::Linear)->position, front.position, "The first keyframe holds before it");
     Near(CameraAt(keys, 20, Easing::Linear)->position, side.position, "The last keyframe holds after it");
     const Camera3D middle = *CameraAt(keys, 5, Easing::Linear);
@@ -46,6 +46,28 @@ void CameraPath() {
          "Interpolation takes the shorter rotation");
 }
 
+void SceneKeyframes() {
+    // A cut that moves and turns, then switches off; annotations appear.
+    SceneState a;
+    a.camera = {{0, 0, 4}, {0, 0, 0}, {0, 1, 0}, 40, CAMERA_PERSPECTIVE};
+    a.clip = true; a.clip_point = {0, 0, 0}; a.clip_normal = {1, 0, 0}; a.annotations = {1};
+    SceneState b = a;
+    b.clip_point = {2, 0, 0}; b.clip_normal = {0, 1, 0}; b.annotations = {1, 2};
+    SceneState c = b;
+    c.clip = false;
+    std::vector<Keyframe> keys{KeyframeFrom(a, 0), KeyframeFrom(b, 2), KeyframeFrom(c, 4)};
+    const auto middle = *StateAt(keys, 1, Easing::Linear);
+    Check(middle.clip, "The cut stays on between keyframes that both cut");
+    Near(middle.clip_point, {1, 0, 0}, "The cut plane moves");
+    Near(middle.clip_normal, Vector3Normalize({1, 1, 0}), "The cut plane turns");
+    Check(middle.annotations == std::vector<uint32_t>{1}, "Annotations switch at the next keyframe");
+    const auto later = *StateAt(keys, 3, Easing::Linear);
+    Check(later.clip && later.annotations.size() == 2, "Switches hold until the next keyframe");
+    Near(later.clip_point, {2, 0, 0}, "A cut switching off does not move");
+    Check(!StateAt(keys, 4, Easing::Linear)->clip && !StateAt(keys, 9, Easing::Linear)->clip, "The cut is off from its keyframe on");
+    Check(StateAt(keys, -1, Easing::Linear)->annotations == std::vector<uint32_t>{1}, "Before the first keyframe its scene holds");
+}
+
 void MovieTiming() {
     const Timing timing{5, 30, .2};
     Check(timing.VideoFrames() == 30, "5 frames held 0.2 s at 30 fps: 30 video frames");
@@ -53,6 +75,12 @@ void MovieTiming() {
           "Each frame is held for 6 video frames");
     Check(std::abs(timing.Position(3) - .5) < 1e-12 && timing.Position(29) <= 4, "Camera positions are continuous");
     Check(Timing{1, 24, .01}.VideoFrames() == 1, "At least one video frame");
+    // A total length: frames share it evenly; one frame fills it.
+    const Timing total{4, 30, .2, 2};
+    Check(total.VideoFrames() == 60 && total.Frame(14) == 0 && total.Frame(15) == 1 && total.Frame(59) == 3,
+          "Four frames share two seconds");
+    const Timing orbit{1, 30, .2, 10};
+    Check(orbit.VideoFrames() == 300 && orbit.Frame(299) == 0 && orbit.Position(150) == 0, "One frame fills a ten-second orbit");
     Check(EvenSize(1081) == 1080 && EvenSize(1) == 2, "Sizes round down to even");
 }
 
@@ -110,6 +138,7 @@ void Encode() {
 int main() {
     try {
         CameraPath();
+        SceneKeyframes();
         MovieTiming();
         Encode();
         std::cout << "movie passed\n";

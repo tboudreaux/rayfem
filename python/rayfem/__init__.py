@@ -36,7 +36,7 @@ class RayFEMError(RuntimeError):
 
 
 def init(port: int = 5555, host: str = "127.0.0.1", *, control_port: int = 0, width: int = 1440,
-         height: int = 900, fps: int = 60, history: int = 120, timeout: float = 5.0,
+         height: int = 900, fps: int = 60, history: int = 1000, timeout: float = 5.0,
          executable: str | None = None) -> InitStatus:
     """Start a viewer, or verify one already listening on ``host:port``.
 

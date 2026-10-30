@@ -48,7 +48,9 @@
 #include "figure/figure_export.hpp"
 #include "figure/movie_export.hpp"
 #include "pipeline/listener.hpp"
+#include "pipeline/retention.hpp"
 #include "panels/frame_info.hpp"
+#include "panels/annotations.hpp"
 #include "interaction/element_picker.hpp"
 #include "panels/element_panel.hpp"
 #include "ui/mouse_modifiers.hpp"
@@ -60,7 +62,8 @@ struct Options {
     int fps = 60;
     int width = 1440;
     int height = 900;
-    int history = 120;
+    int history = 1000;
+    int historyMib = 2048;
     std::string archive;
     bool light = false;
     float explosion = 0;
@@ -172,6 +175,7 @@ public:
         SetWindowMinSize(960, 640);
         SetTargetFPS(opts.fps);
         elementExplosion=opts.explosion;
+        retention.max_frames=opts.history;retention.max_mib=opts.historyMib;
         flow.SetWorker(&pipeline);
         profiles.SetWorker(&pipeline);
         surfaceTrace.SetWorker(&pipeline);
@@ -226,6 +230,7 @@ public:
         streamlineRenderer.Shutdown();
         figureExporter.Shutdown();
         if (movieTarget.id) UnloadRenderTexture(movieTarget);
+        if (movieFont.texture.id && movieFont.texture.id!=GetFontDefault().texture.id) UnloadFont(movieFont);
         edgeRenderer.Shutdown();
         dofRenderer.Shutdown();
         rayPlacement.Shutdown();
@@ -366,26 +371,41 @@ private:
         for (auto& frame : pipeline.TakeFrames()) {
             if (frameFilter.discard && frameFilter.Active() && !frameFilter.Matches(*frame)) {++discardedFrames;continue;}
             tracking.Observe(frame);
+            arrival[frame.get()]=arrivals++;
             frames.push_back(std::move(frame));
         }
-        while (frames.size() > static_cast<size_t>(opts.history) || (frames.size()>1 && HistoryBytes()>256ULL*1024*1024)) {
-            // A frame viewed while not following stays put: evict the next
-            // oldest instead, so a paused view does not advance on its own.
-            // Frames a movie export is writing stay until it ends.
-            std::size_t victim = !follow && selected == 0 && frames.size() > 1 ? 1 : 0;
-            while (victim < frames.size() && std::find(movieFrames.begin(), movieFrames.end(), frames[victim]) != movieFrames.end())
-                ++victim;
-            if (victim >= frames.size() || (!follow && static_cast<int>(victim) == selected && victim + 1 >= frames.size())) break;
-            const auto evicted = frames[victim];
+        // Evict by the retention policy until the history fits. Pinned
+        // frames, the frame viewed while paused and frames a movie export is
+        // writing always stay.
+        auto over=[&] {
+            return frames.size()>static_cast<size_t>(std::max(1,retention.max_frames)) ||
+                   (frames.size()>1 && static_cast<double>(HistoryBytes())>retention.max_mib*1048576.0);
+        };
+        while (over()) {
+            std::vector<RayFEM::UI::RetentionCandidate> candidates;
+            candidates.reserve(frames.size());
+            for (size_t i=0;i<frames.size();++i) {
+                const auto& frame=frames[i];
+                const bool keep=(!follow && static_cast<int>(i)==selected) || Pinned(frame) ||
+                    std::find(movieFrames.begin(),movieFrames.end(),frame)!=movieFrames.end();
+                const auto order=arrival.find(frame.get());
+                candidates.push_back({order==arrival.end()?0:order->second,keep,RetentionProtected(*frame)});
+            }
+            const auto victim=RayFEM::UI::ChooseEviction(candidates,retention);
+            if (!victim) break;
+            const auto evicted = frames[*victim];
             for (auto it=cache.begin(); it!=cache.end();) {
                 // The surface on screen (the newest entry) stays until a
                 // newer one replaces it; dropping it would blank the view.
                 if (it->frame == evicted && &*it != &cache.back()) { ReleaseView(*it); it=cache.erase(it); }
                 else ++it;
             }
-            frames.erase(frames.begin() + victim);
-            if (static_cast<int>(victim) < selected) --selected;
+            arrival.erase(evicted.get());
+            frames.erase(frames.begin() + static_cast<long>(*victim));
+            if (static_cast<int>(*victim) < selected) --selected;
+            ++evictedFrames;
         }
+        std::erase_if(pinned,[&](const auto& frame){return std::find(frames.begin(),frames.end(),frame)==frames.end();});
         // Follow, play and keep the view on frames the filter shows.
         const auto shown = Shown();
         if (follow && !frames.empty()) selected = shown.empty() ? static_cast<int>(frames.size()) - 1 : shown.back();
@@ -401,6 +421,64 @@ private:
             lastPlay = GetTime();
         }
         if (Current() != previous) error.clear();
+    }
+
+    bool Pinned(const std::shared_ptr<RayFEM::RenderFrame>& frame) const {
+        return std::find(pinned.begin(),pinned.end(),frame)!=pinned.end();
+    }
+    void TogglePin() {
+        const auto frame=Current();
+        if(!frame)return;
+        if(Pinned(frame))std::erase(pinned,frame);
+        else pinned.push_back(frame);
+    }
+    // Frames the retention policy evicts only after all others.
+    bool RetentionProtected(const RayFEM::RenderFrame& frame) const {
+        if(retention.protect_shown && frameFilter.Active() && frameFilter.Matches(frame))return true;
+        return std::any_of(retention.protect_tags.begin(),retention.protect_tags.end(),
+                           [&](const std::string& tag){return frame.metadata.hasTag(tag);});
+    }
+
+    // The History popover: capacity, what goes when full, what goes last.
+    void DrawHistorySettings() {
+        ImGui::SeparatorText("History");
+        RayFEM::UI::FieldLabel("Keep up to");
+        ImGui::SetNextItemWidth(170);
+        if(ImGui::InputInt("frames##history_frames",&retention.max_frames,100,1000))retention.max_frames=std::clamp(retention.max_frames,1,1000000);
+        ImGui::SetNextItemWidth(170);
+        int mib=static_cast<int>(retention.max_mib);
+        if(ImGui::InputInt("MiB##history_mib",&mib,256,1024))retention.max_mib=std::clamp(mib,16,1048576);
+        Tip("Whichever limit is reached first starts eviction. Memory is a conservative estimate of field and mesh data.");
+        RayFEM::UI::FieldLabel("When full, evict");
+        int strategy=retention.strategy==RayFEM::UI::RetentionPolicy::Strategy::Thin?1:0;
+        if(RayFEM::UI::Segmented("##history_strategy",&strategy,{"Oldest first","Thin older frames"}))
+            retention.strategy=strategy?RayFEM::UI::RetentionPolicy::Strategy::Thin:RayFEM::UI::RetentionPolicy::Strategy::Oldest;
+        if(retention.strategy==RayFEM::UI::RetentionPolicy::Strategy::Thin) {
+            ImGui::SetNextItemWidth(110);
+            ImGui::SliderInt("##history_thin",&retention.thin_every,2,16,"every %dth",ImGuiSliderFlags_AlwaysClamp);
+            ImGui::TextWrapped("The newest %d frames stay dense; older ones thin to every %dth, then every %dth, and so on, "
+                               "so the whole run stays represented.",std::max(1,retention.max_frames/2),retention.thin_every,
+                               retention.thin_every*retention.thin_every);
+        }
+        RayFEM::UI::FieldLabel("Evict last");
+        ImGui::BeginDisabled(!frameFilter.Active());
+        RayFEM::UI::Switch("Frames the timeline filter shows",&retention.protect_shown);
+        ImGui::EndDisabled();
+        Tip("Frames the funnel filter shows are evicted only after every other frame. Set a filter first.");
+        const auto vocabulary=RayFEM::UI::FrameVocabulary::From(frames);
+        for(const auto& tag:vocabulary.tags) {
+            bool on=retention.protect_tags.count(tag.name)>0;
+            if(ImGui::Checkbox(("Tagged " + tag.name).c_str(),&on)) {
+                if(on)retention.protect_tags.insert(tag.name);
+                else retention.protect_tags.erase(tag.name);
+            }
+            if(!tag.description.empty())Tip(tag.description.c_str());
+        }
+        if(vocabulary.tags.empty())ImGui::TextDisabled("Tags appear here when clients send them.");
+        ImGui::Separator();
+        ImGui::Text("%zu frames · ~%.0f MiB · %zu pinned",frames.size(),HistoryBytes()/1048576.0,pinned.size());
+        if(!pinned.empty()){ImGui::SameLine();if(ImGui::SmallButton("Unpin all"))pinned.clear();}
+        ImGui::TextDisabled("%zu evicted so far",evictedFrames);
     }
 
     // Indices of retained frames the timeline filter shows, in order.
@@ -745,7 +823,11 @@ private:
     void DrawUI() {
         ImGui::SetNextWindowPos({0,0});
         ImGui::SetNextWindowSize({static_cast<float>(GetScreenWidth()),static_cast<float>(GetScreenHeight())});
-        ImGui::Begin("RayFEM",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
+        // The full-window workspace stays behind floating windows (Movie,
+        // ray placement) even when clicked; otherwise a click in it would
+        // raise it over them and they would seem to vanish.
+        ImGui::Begin("RayFEM",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|
+                     ImGuiWindowFlags_NoBringToFrontOnFocus);
         const bool light = RayFEM::UI::CurrentTheme() == RayFEM::UI::ThemeMode::Light;
         const char* openLabel=ICON_FA_FOLDER_OPEN "  Open";
         const char* themeLabel=light?ICON_FA_MOON "###theme":ICON_FA_SUN "###theme";
@@ -835,6 +917,7 @@ private:
         DrawArchiveDialogs();
         figureExporter.Draw(FigureScene());
         movieExporter.Draw(MovieHost());
+        DrawAnnotationsWindow();
         ImGui::Spacing();
         auto frame=Current();auto* gf=Field(frame);
         elements.Context(frame);
@@ -895,53 +978,7 @@ private:
         ImGui::EndChild();
         ImGui::SameLine();
         ImGui::BeginChild("Workspace",{0,0},ImGuiChildFlags_AlwaysUseWindowPadding);
-        // Toolbar groups: camera, picking, analysis views, then panels. Lit
-        // buttons show which of these modes are currently on.
-        auto action = [](const char* label, bool active, const char* tip, bool group = false) {
-            const auto& style = ImGui::GetStyle();
-            const float gap = group ? style.ItemSpacing.x*2 : 0;
-            const float width = ImGui::CalcTextSize(label, nullptr, true).x + style.FramePadding.x*2;
-            if (RayFEM::UI::NextInlineItem(width + gap) && group) {
-                const float x = ImGui::GetItemRectMax().x + style.ItemSpacing.x*1.5f;
-                const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
-                ImGui::GetWindowDrawList()->AddLine({x, min.y+5}, {x, max.y-5}, ImGui::GetColorU32(ImGuiCol_Border));
-                ImGui::SameLine(0, style.ItemSpacing.x + gap);
-            }
-            const bool pressed = RayFEM::UI::ToggleButton(label, active);
-            Tip(tip);
-            return pressed;
-        };
-        if(ImGui::Button(ICON_FA_EXPAND "  Fit")) {cameraAdjusted=false;if(auto* active=ActiveView();active && active->vertices) FitCamera(active->bounds);}
-        Tip("Fit mesh in view (R)");
-        if(action(ICON_FA_ARROWS_SPIN "  Spin",spin.active,
-                  "Keep the view turning (S). Releasing a drag while it moves also starts a spin; a click in the view stops it. "
-                  "Only the view turns, not the data."))
-            spin.active=!spin.active;
-        ImGui::SameLine(0,2);
-        if(ImGui::Button(ICON_FA_CARET_DOWN "##spin_options"))ImGui::OpenPopup("Spin options");
-        Tip("Spin axis and rate");
-        if(ImGui::BeginPopup("Spin options")) {SpinControls();ImGui::EndPopup();}
-        if(action(pickingDof?ICON_FA_XMARK "  Cancel pick###pick":ICON_FA_CROSSHAIRS "  Pick DOF###pick",pickingDof,
-                  pickingDof?"Stop picking (Esc)":"Pick a degree of freedom in the mesh to track its coefficient over time.",true)) {
-            pickingDof=!pickingDof;if(pickingDof) showDofs=true;
-        }
-        if(action(ICON_FA_RULER_HORIZONTAL "  1D profile",profiles.Mode()==1,"Sample the field along a ray. Drag the handles in the viewport.",true))
-            {profiles.OpenRay();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;}
-        if(action(ICON_FA_TABLE_CELLS "  2D profile",profiles.Mode()==2,"Sample the field across a plane as a heatmap."))
-            {profiles.OpenPlane();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;}
-        if(action(ICON_FA_GLOBE "  Surface trace",surfaceTrace.Enabled(),"Sample the field along a meridian or latitude of the outer surface."))
-            {surfaceTrace.Open();profiles.SetMode(0);inspectorTab=1;plotTab=2;showPlots=true;}
-        if(action(ICON_FA_CHART_LINE "  Tracks",false,"Show values tracked across frames."))
-            {inspectorTab=1;plotTab=1;showPlots=true;}
-        if(action(ICON_FA_WIND "  Flow",flow.Enabled(),"Show arrows or streamlines of a vector field."))
-            {flow.Open();inspectorTab=0;}
-        if(action(ICON_FA_SQUARE_POLL_VERTICAL "  Plots",showPlots,showPlots?"Hide the plot panel":"Show the plot panel",true))
-            showPlots=!showPlots;
-        if(action(ICON_FA_IMAGE "  Export",false,"Export the 3D view as a PNG or PDF figure, with axes and a colorbar (Cmd/Ctrl+E).",true))
-            figureExporter.Open(FigureScene());
-        if(action(ICON_FA_FILM "  Movie",movieExporter.IsOpen() || movieExporter.Exporting(),
-                  "Export the frames the timeline shows as an H.264 movie, with camera keyframes and optional spin."))
-            movieExporter.Open(MovieHost());
+        DrawToolbar();
         const float available=ImGui::GetContentRegionAvail().y;
         const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || tracking.HasTracks() || plotTab==1);
         float plotHeight=0;
@@ -1387,6 +1424,8 @@ private:
     static constexpr const char* nextFrameLabel=ICON_FA_FORWARD_STEP "###next";
     static constexpr const char* liveLabel=ICON_FA_TOWER_BROADCAST "  Live###live";
     static constexpr const char* filterLabel=ICON_FA_FILTER "###frame_filter";
+    static constexpr const char* pinLabel=ICON_FA_THUMBTACK "###pin_frame";
+    static constexpr const char* historyLabel=ICON_FA_CLOCK_ROTATE_LEFT "###history";
     static constexpr float playButtonWidth=92;
 
     std::string TimelineLabel() const {
@@ -1409,7 +1448,7 @@ private:
     float TimelineControlsWidth() const {
         const auto& style=ImGui::GetStyle();
         auto button=[&](const char* label) {return ImGui::CalcTextSize(label,nullptr,true).x+2*style.FramePadding.x;};
-        return button(previousFrameLabel)+button(nextFrameLabel)+playButtonWidth+12+100+button(liveLabel)+button(filterLabel)+4*style.ItemSpacing.x;
+        return button(previousFrameLabel)+button(nextFrameLabel)+playButtonWidth+12+100+button(liveLabel)+button(filterLabel)+button(pinLabel)+button(historyLabel)+6*style.ItemSpacing.x;
     }
 
     // The timeline as a card: a transport group, speed and Live, the current
@@ -1460,6 +1499,15 @@ private:
             if(discardedFrames) ImGui::TextDisabled("%zu frames discarded on arrival",discardedFrames);
             ImGui::EndPopup();
         }
+        ImGui::SameLine();
+        const bool currentPinned=Current() && Pinned(Current());
+        if(RayFEM::UI::ToggleButton(pinLabel,currentPinned))TogglePin();
+        Tip(currentPinned?"Pinned: this frame is never evicted. Click to unpin (P).":"Pin this frame so it is never evicted (P)");
+        ImGui::SameLine();
+        if(ImGui::Button(historyLabel))ImGui::OpenPopup("History");
+        Tip("History: how many frames to keep and which to evict first");
+        ImGui::SetNextWindowSize({440,0});
+        if(ImGui::BeginPopup("History")) {DrawHistorySettings();ImGui::EndPopup();}
         if(Current()) {
             // The current frame, right-aligned on the same row when it fits.
             const auto label=TimelineLabel();
@@ -1480,7 +1528,9 @@ private:
                 const int frame=shown.empty()?selected:shown[std::clamp(index,0,static_cast<int>(shown.size())-1)];
                 return RayFEM::UI::FrameCaption(*frames[std::clamp(frame,0,static_cast<int>(frames.size())-1)]);
             };
-            if(RayFEM::UI::Scrubber("##frame",&position,count,trackWidth,describe)) {
+            std::vector<int> pins;
+            for(int i=0;i<static_cast<int>(shown.size());++i)if(Pinned(frames[shown[i]]))pins.push_back(i);
+            if(RayFEM::UI::Scrubber("##frame",&position,count,trackWidth,describe,&pins)) {
                 if(!shown.empty())selected=shown[std::clamp(position,0,static_cast<int>(shown.size())-1)];
                 follow=false;playing=false;
             }
@@ -1556,6 +1606,7 @@ private:
             if (showDofs) DrawDofMarkers(*active,lineViewport);
         }
         if (active && active->vertices && showModelAxes) DrawModelAxes(active->bounds);
+        if (active && active->vertices) annotations.Draw3D(std::max(1e-6f,Vector3Length(Vector3Subtract(active->bounds.max,active->bounds.min))*.5f));
         if (layers.guides) {
             if (planeGuide) DrawPlaneGuide();
             profiles.DrawGuide();
@@ -1610,32 +1661,119 @@ private:
         }
     }
 
+    // The Annotate window: a floating window, so the view stays usable for
+    // clicking points.
+    void DrawAnnotationsWindow() {
+        if(!annotationsOpen) {if(annotations.Placing()!=RayFEM::UI::Annotations::Tool::None)annotations.Cancel();return;}
+        ImGui::SetNextWindowSize({380,320},ImGuiCond_Appearing);
+        ImGui::SetNextWindowPos({viewportOrigin.x+16,viewportOrigin.y+16},ImGuiCond_Appearing);
+        if(annotationsFocus){ImGui::SetNextWindowFocus();annotationsFocus=false;}
+        if(ImGui::Begin(ICON_FA_PEN "  Annotations###annotations",&annotationsOpen,ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoCollapse))
+            annotations.Controls();
+        ImGui::End();
+    }
+
+    // One row: view controls, analysis tools and panels, with Export at the
+    // right. Lit buttons show modes that are on. When the labels do not fit,
+    // every button shows only its icon, and its name in the tooltip.
+    void DrawToolbar() {
+        struct Tool {const char* icon;const char* label;bool active;const char* tip;std::function<void()> run;bool group;};
+        const std::vector<Tool> tools={
+            {pickingDof?ICON_FA_XMARK:ICON_FA_CROSSHAIRS,pickingDof?"Cancel pick":"Pick DOF",pickingDof,
+             pickingDof?"Stop picking (Esc)":"Pick DOF: pick a degree of freedom in the mesh to track its coefficient over time.",
+             [this]{pickingDof=!pickingDof;if(pickingDof)showDofs=true;},true},
+            {ICON_FA_RULER_HORIZONTAL,"1D profile",profiles.Mode()==1,"1D profile: sample the field along a ray. Drag the handles in the viewport.",
+             [this]{profiles.OpenRay();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;},false},
+            {ICON_FA_TABLE_CELLS,"2D profile",profiles.Mode()==2,"2D profile: sample the field across a plane as a heatmap.",
+             [this]{profiles.OpenPlane();surfaceTrace.SetEnabled(false);inspectorTab=1;plotTab=0;showPlots=true;},false},
+            {ICON_FA_GLOBE,"Surface trace",surfaceTrace.Enabled(),"Surface trace: sample the field along a meridian or latitude of the outer surface.",
+             [this]{surfaceTrace.Open();profiles.SetMode(0);inspectorTab=1;plotTab=2;showPlots=true;},false},
+            {ICON_FA_WIND,"Flow",flow.Enabled(),"Flow: show arrows or streamlines of a vector field.",
+             [this]{flow.Open();inspectorTab=0;},false},
+            {ICON_FA_PEN,"Annotate",annotationsOpen || annotations.Placing()!=RayFEM::UI::Annotations::Tool::None,
+             "Annotate: draw lines and place labels on the model, for figures and movies.",
+             [this]{annotationsOpen=!annotationsOpen;annotationsFocus=annotationsOpen;},false},
+            {ICON_FA_CHART_LINE,"Tracks",false,"Tracks: show values tracked across frames.",
+             [this]{inspectorTab=1;plotTab=1;showPlots=true;},true},
+            {ICON_FA_SQUARE_POLL_VERTICAL,"Plots",showPlots,showPlots?"Plots: hide the plot panel":"Plots: show the plot panel",
+             [this]{showPlots=!showPlots;},false},
+        };
+        const auto& style=ImGui::GetStyle();
+        auto width=[&](const std::string& label){return ImGui::CalcTextSize(label.c_str(),nullptr,true).x+style.FramePadding.x*2;};
+        auto text=[](const char* icon,const char* label,bool compact){return compact?std::string(icon):std::string(icon)+"  "+label;};
+        const char* exportLabel=ICON_FA_FILE_EXPORT "  Export  " ICON_FA_CARET_DOWN;
+        const float caret=width(ICON_FA_CARET_DOWN);
+        auto rowWidth=[&](bool compact) {
+            float total=width(text(ICON_FA_EXPAND,"Fit",compact))+width(text(ICON_FA_ARROWS_SPIN,"Spin",compact))+caret+3*style.ItemSpacing.x;
+            for(const auto& tool:tools)total+=width(text(tool.icon,tool.label,compact))+style.ItemSpacing.x*(tool.group?3:1);
+            return total+style.ItemSpacing.x*3+width(exportLabel);
+        };
+        const float right=ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x;
+        const bool compact=rowWidth(false)>ImGui::GetContentRegionAvail().x;
+        auto separator=[&] {
+            ImGui::SameLine(0,style.ItemSpacing.x*1.5f);
+            const float x=ImGui::GetCursorScreenPos().x;
+            const ImVec2 min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
+            ImGui::GetWindowDrawList()->AddLine({x,min.y+5},{x,max.y-5},ImGui::GetColorU32(ImGuiCol_Border));
+            ImGui::SameLine(0,style.ItemSpacing.x*1.5f);
+        };
+        if(ImGui::Button((text(ICON_FA_EXPAND,"Fit",compact)+"###fit").c_str())) {
+            cameraAdjusted=false;
+            if(auto* active=ActiveView();active && active->vertices)FitCamera(active->bounds);
+        }
+        Tip("Fit the mesh in view (R)");
+        ImGui::SameLine();
+        if(RayFEM::UI::ToggleButton((text(ICON_FA_ARROWS_SPIN,"Spin",compact)+"###spin").c_str(),spin.active))spin.active=!spin.active;
+        Tip("Spin: keep the view turning (S). Releasing a drag while it moves also starts a spin; a click in the view stops it. "
+            "Only the view turns, not the data.");
+        ImGui::SameLine(0,1);
+        if(ImGui::Button(ICON_FA_CARET_DOWN "##spin_options"))ImGui::OpenPopup("Spin options");
+        Tip("Spin axis and rate");
+        if(ImGui::BeginPopup("Spin options")) {SpinControls();ImGui::EndPopup();}
+        for(const auto& tool:tools) {
+            if(tool.group)separator();
+            else ImGui::SameLine();
+            if(RayFEM::UI::ToggleButton((text(tool.icon,tool.label,compact)+"###"+tool.label).c_str(),tool.active))tool.run();
+            Tip(tool.tip);
+        }
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX()+style.ItemSpacing.x,right-width(exportLabel)));
+        if(RayFEM::UI::ToggleButton(exportLabel,movieExporter.IsOpen() || movieExporter.Exporting()))ImGui::OpenPopup("Export menu");
+        Tip("Export the view as a figure or a movie");
+        if(ImGui::BeginPopup("Export menu")) {
+            if(ImGui::MenuItem(ICON_FA_IMAGE "  Figure...","Ctrl/Cmd+E"))figureExporter.Open(FigureScene());
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("The 3D view as a PNG or PDF figure, with axes and a colorbar.");
+            if(ImGui::MenuItem(ICON_FA_FILM "  Movie...",nullptr,movieExporter.IsOpen() || movieExporter.Exporting()))
+                movieExporter.Open(MovieHost());
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("The frames the timeline shows as an H.264 movie, with camera keyframes.");
+            ImGui::EndPopup();
+        }
+    }
+
     // The viewer as the Movie window sees it. Positions count the frames the
     // timeline shows; an export captures its frames so streaming cannot
     // evict or reorder them.
     RayFEM::UI::Movie::Host MovieHost() {
         RayFEM::UI::Movie::Host host;
         host.frames=[this]{return static_cast<int>(Shown().size());};
-        host.current=[this]{
-            const auto shown=Shown();
-            const auto at=std::lower_bound(shown.begin(),shown.end(),selected);
-            return at==shown.end()?std::max(0,static_cast<int>(shown.size())-1):static_cast<int>(at-shown.begin());
-        };
         host.label=[this](int position) {
             const auto shown=Shown();
             return position>=0 && position<static_cast<int>(shown.size())?RayFEM::UI::FrameCaption(*frames[shown[position]]):std::string();
         };
-        host.camera=[this]{return camera;};
-        host.viewport=[this]{return Vector2{std::max(16.f,viewportSize.x),std::max(16.f,viewportSize.y)};};
-        host.show=[this](int position,const Camera3D& view) {
+        host.state=[this]{
+            return RayFEM::UI::Movie::SceneState{camera,clip,slicePoint,sliceNormal,clipMode,annotations.Visible()};
+        };
+        host.apply=[this](int position,const RayFEM::UI::Movie::SceneState& scene) {
             if(position>=0) {
                 const auto shown=Shown();
                 if(position<static_cast<int>(shown.size()))selected=shown[position];
                 follow=false;playing=false;
             }
             cameraTransition.active=false;spin.active=false;
-            camera=view;cameraAdjusted=true;
+            camera=scene.camera;cameraAdjusted=true;
+            clip=scene.clip;slicePoint=scene.clip_point;sliceNormal=scene.clip_normal;clipMode=scene.clip_mode;
+            annotations.SetVisible(scene.annotations);
         };
+        host.viewport=[this]{return Vector2{std::max(16.f,viewportSize.x),std::max(16.f,viewportSize.y)};};
         host.capture=[this](int first,int last) {
             const auto shown=Shown();
             movieFrames.clear();
@@ -1653,9 +1791,9 @@ private:
         host.render=[this](const Camera3D& view,int width,int height,int supersample,std::vector<unsigned char>& rgba) {
             return RenderMovieFrame(view,width,height,supersample,rgba);
         };
-        host.spin=[this](Camera3D& view,double seconds) {
+        host.spin=[this](Camera3D& view,double radians) {
             const auto [direction,point]=SpinLine(view);
-            RayFEM::SpinCamera(view,direction,point,static_cast<float>(spin.rate*DEG2RAD*seconds));
+            RayFEM::SpinCamera(view,direction,point,static_cast<float>(radians));
         };
         host.release=[this]{movieFrames.clear();};
         return host;
@@ -1678,6 +1816,27 @@ private:
         RenderScene(movieTarget,shown,RayFEM::UI::Palette().viewport_background,{screen,h*screen/w},
                     {.reference=true,.selection=false,.guides=false});
         camera=saved;
+        // Annotation text, sized to the picture.
+        if(const auto texts=annotations.Texts(view,w,h);!texts.empty()) {
+            const int size=std::max(12,static_cast<int>(h*.032f));
+            if(movieFontSize!=size) {
+                if(movieFont.texture.id && movieFont.texture.id!=GetFontDefault().texture.id)UnloadFont(movieFont);
+                movieFont=GetFontDefault();
+                if(const auto path=RayFEM::UI::Figure::FigureFontPath()) {
+                    const auto& codepoints=RayFEM::UI::Figure::FigureCodepoints();
+                    Font loaded=LoadFontEx(path->c_str(),size,const_cast<int*>(codepoints.data()),static_cast<int>(codepoints.size()));
+                    if(loaded.texture.id) {movieFont=loaded;SetTextureFilter(movieFont.texture,TEXTURE_FILTER_BILINEAR);}
+                }
+                movieFontSize=size;
+            }
+            BeginTextureMode(movieTarget);
+            for(const auto& t:texts) {
+                const Vector2 at{t.at.x+8.f*supersample,t.at.y-size*.5f};
+                DrawTextEx(movieFont,t.text.c_str(),{at.x+supersample,at.y+supersample},static_cast<float>(size),0,{0,0,0,160});
+                DrawTextEx(movieFont,t.text.c_str(),at,static_cast<float>(size),0,t.color);
+            }
+            EndTextureMode();
+        }
         Image image=LoadImageFromTexture(movieTarget.texture);
         ImageFlipVertical(&image);
         if(supersample>1)ImageResize(&image,width,height);
@@ -1789,8 +1948,10 @@ private:
                elementPressIdentity==meshIdentity(active->frame)) {
                 const auto hit=active->picker.Pick(GetScreenToWorldRayEx(
                     {mouse.x-origin.x,mouse.y-origin.y},camera,width,height));
-                // While placing a ray, a click chooses that endpoint's element.
-                if(rayPlacement.WantsElement()) {if(hit)rayPlacement.ChooseElement(hit->element);}
+                // While annotating, a click on the surface places a point;
+                // while placing a ray, it chooses that endpoint's element.
+                if(annotations.Placing()!=RayFEM::UI::Annotations::Tool::None) {if(hit)annotations.Click(hit->position);}
+                else if(rayPlacement.WantsElement()) {if(hit)rayPlacement.ChooseElement(hit->element);}
                 else {
                     elements.Select(hit?std::optional<int>{hit->element}:std::nullopt,elementPressAdditive);
                     if(hit)inspectorTab=2;
@@ -1809,10 +1970,13 @@ private:
         }
         if (hovered && IsKeyPressed(KEY_R) && active && active->vertices) {cameraAdjusted=false;FitCamera(active->bounds);}
         if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_HOME))HomeCamera();
+        if(annotations.Placing()!=RayFEM::UI::Annotations::Tool::None && !ImGui::IsAnyItemActive() &&
+           ImGui::IsKeyPressed(ImGuiKey_Escape,false))annotations.Cancel();
         if(pickingDof && !ImGui::IsAnyItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape,false) &&
            !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))pickingDof=false;
         if(RayFEM::UpdateCameraViewTransition(camera,cameraTransition,GetTime()))cameraAdjusted=true;
         if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_S))spin.active=!spin.active;
+        if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_P))TogglePin();
         // A camera transition (Fit, Home, the cube) ends a spin.
         if(cameraTransition.active)spin.active=false;
         if(spin.active) {
@@ -1927,6 +2091,7 @@ private:
             if(coloring==2) draw->AddText({origin.x+16,y+3},RayFEM::UI::Palette().muted,"0: interior / cut");
         }
         DrawModelAxisLabels(active,origin,size);
+        annotations.DrawTexts(ImGui::GetWindowDrawList(),origin,size,camera);
         DrawViewportMessages(active,origin,size,orientation);
         RayFEM::UI::DrawOrientationCube(camera,orientation.cube,mouse,hovered && !existingDrag,cubePointer.dragging);
         RayFEM::UI::DrawCameraRotationArrows(orientation,mouse,hovered && !existingDrag,rotationIcons);
@@ -2265,8 +2430,18 @@ private:
     RayFEM::UI::EdgeRenderer edgeRenderer;
     RayFEM::UI::Figure::Exporter figureExporter;
     RayFEM::UI::Movie::Exporter movieExporter;
+    RayFEM::UI::Annotations annotations;
+    bool annotationsOpen=false,annotationsFocus=false;
+    Font movieFont{};
+    int movieFontSize=0;
     RenderTexture2D movieTarget{};
     std::vector<std::shared_ptr<RayFEM::RenderFrame>> movieFrames;
+    // History retention: the policy, pinned frames, and arrival order.
+    RayFEM::UI::RetentionPolicy retention;
+    std::vector<std::shared_ptr<RayFEM::RenderFrame>> pinned;
+    std::unordered_map<const RayFEM::RenderFrame*,uint64_t> arrival;
+    uint64_t arrivals=0;
+    size_t evictedFrames=0;
     RayFEM::UI::DofRenderer dofRenderer;
     RayFEM::UI::RayPlacement rayPlacement;
     ImVec2 viewportOrigin{},viewportSize{};
@@ -2284,7 +2459,8 @@ int main(int argc,char** argv) {
     cli.add_option("--fps",options.fps,"Maximum display rate")->check(CLI::Range(1,240));
     cli.add_option("--width",options.width)->check(CLI::Range(960,7680));
     cli.add_option("--height",options.height)->check(CLI::Range(640,4320));
-    cli.add_option("--history",options.history,"Maximum retained frames (also bounded by field memory)")->check(CLI::Range(1,10000));
+    cli.add_option("--history",options.history,"Maximum retained frames (also bounded by --history-mib)")->check(CLI::Range(1,1000000));
+    cli.add_option("--history-mib",options.historyMib,"Memory budget for retained frames, in MiB")->check(CLI::Range(16,1048576));
     cli.add_option("file,--open",options.archive,"Open a .serif archive");
     cli.add_flag("--light",options.light,"Start in light mode");
     cli.add_option("--explode",options.explosion,"Element spacing (0 restores the mesh)")->check(CLI::Range(0.0f,.95f));

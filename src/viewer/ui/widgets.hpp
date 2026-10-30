@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <vector>
 #include <initializer_list>
 #include <string>
 
@@ -110,7 +111,13 @@ inline bool Switch(const char* label, bool* value) {
 inline bool Segmented(const char* id, int* value, std::initializer_list<const char*> labels) {
     ImGui::PushID(id);
     const int count = static_cast<int>(labels.size());
-    const float width = ImGui::GetContentRegionAvail().x, height = ImGui::GetFrameHeight();
+    // The available width, or what the labels need where there is none yet
+    // (the first frame of an auto-sizing popup): ImGui rejects empty buttons.
+    float natural = 0;
+    for (const char* label : labels) natural += ImGui::CalcTextSize(label, nullptr, true).x + 20;
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float width = available >= natural * .5f && available > count ? available : natural;
+    const float height = ImGui::GetFrameHeight();
     const ImVec2 min = ImGui::GetCursorScreenPos();
     auto* draw = ImGui::GetWindowDrawList();
     const auto& palette = Palette();
@@ -187,7 +194,9 @@ inline bool ColorMapPicker(const char* id, int* map, bool reverse) {
 
 // A timeline scrubber: thin track, accent fill to the current position and a
 // round handle. Hovering describes the frame under the cursor.
-inline bool Scrubber(const char* id, int* value, int count, float width, const std::function<std::string(int)>& describe) {
+// marks: indices drawn as small pins above the track (pinned frames).
+inline bool Scrubber(const char* id, int* value, int count, float width, const std::function<std::string(int)>& describe,
+                     const std::vector<int>* marks = nullptr) {
     const float height = ImGui::GetFrameHeight();
     const ImVec2 min = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(id, {width, height});
@@ -208,6 +217,11 @@ inline bool Scrubber(const char* id, int* value, int count, float width, const s
         for (int i = 0; i < count; ++i) {
             const float x = left + (right - left)*fraction(i);
             draw->AddLine({x, center + 5}, {x, center + 8}, WithAlpha(palette.muted, 90));
+        }
+    if (marks)
+        for (int index : *marks) {
+            const float mx = left + (right - left)*fraction(std::clamp(index, 0, std::max(0, count - 1)));
+            draw->AddTriangleFilled({mx - 4, center - 10}, {mx + 4, center - 10}, {mx, center - 5}, palette.guide);
         }
     const float x = left + (right - left)*fraction(std::clamp(*value, 0, std::max(0, count - 1)));
     if (count > 0) {

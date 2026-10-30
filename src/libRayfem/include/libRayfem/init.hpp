@@ -12,7 +12,7 @@ struct WindowParams {
     int width = 1440;
     int height = 900;
     int fps = 60;
-    int history = 120;
+    int history = 1000;
     int timeout_ms = 5000;
     // Search order: this path, RAYFEM_EXECUTABLE, sibling RayFEM, then PATH.
     std::string executable;

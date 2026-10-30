@@ -11,6 +11,7 @@
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
+#include <cstdint>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -22,80 +23,113 @@ namespace RayFEM::UI::Movie {
 using Figure::ReadText;
 using Figure::ShellQuote;
 
-// A camera pose at a point in the movie, measured in shown frames: 0 is the
-// first frame of the selection and 2.5 is halfway between the third and
-// fourth.
+// What a keyframe records: the camera, the cut, and which annotations show.
+struct SceneState {
+    Camera3D camera{};
+    bool clip = false;
+    Vector3 clip_point{}, clip_normal{1, 0, 0};
+    int clip_mode = 0;
+    std::vector<uint32_t> annotations;
+};
+
+// A scene at a moment of the movie, in seconds from its start.
 struct Keyframe {
-    double position = 0;
+    double time = 0;
     Vector3 target{};
     float distance = 1;
     Quaternion orientation{0, 0, 0, 1};  // the camera basis (CameraBasisQuaternion)
     float fovy = 40;
+    bool clip = false;
+    Vector3 clip_point{}, clip_normal{1, 0, 0};
+    int clip_mode = 0;
+    std::vector<uint32_t> annotations;
 };
 
-inline Keyframe KeyframeFrom(const Camera3D& camera, double position) {
-    return {position, camera.target, Vector3Distance(camera.position, camera.target),
-            CameraBasisQuaternion(CameraBasis(camera)), camera.fovy};
+inline Keyframe KeyframeFrom(const SceneState& state, double time) {
+    const auto& camera = state.camera;
+    return {time, camera.target, Vector3Distance(camera.position, camera.target),
+            CameraBasisQuaternion(CameraBasis(camera)), camera.fovy,
+            state.clip, state.clip_point, state.clip_normal, state.clip_mode, state.annotations};
 }
+inline Keyframe KeyframeFrom(const Camera3D& camera, double time) { return KeyframeFrom(SceneState{camera}, time); }
 
 inline Camera3D CameraFrom(const Keyframe& key, int projection = CAMERA_PERSPECTIVE) {
     const Vector3 back = Vector3RotateByQuaternion({0, 0, 1}, key.orientation);
     const Vector3 up = Vector3RotateByQuaternion({0, 1, 0}, key.orientation);
     return {Vector3Add(key.target, Vector3Scale(back, key.distance)), key.target, up, key.fovy, projection};
 }
+inline SceneState StateFrom(const Keyframe& key, int projection = CAMERA_PERSPECTIVE) {
+    return {CameraFrom(key, projection), key.clip, key.clip_point, key.clip_normal, key.clip_mode, key.annotations};
+}
 
 enum class Easing { EaseInOut, Linear };
 
-// The camera at position along the keyframes (sorted by position). Before the
-// first and after the last keyframe the camera holds still. Orientation takes
-// the shortest rotation; distance changes geometrically, so zooming reads as
-// steady; EaseInOut slows to a stop at every keyframe.
-inline std::optional<Camera3D> CameraAt(const std::vector<Keyframe>& keys, double position, Easing easing,
-                                        int projection = CAMERA_PERSPECTIVE) {
+// The scene at time along the keyframes (sorted by time). Before the first
+// and after the last keyframe it holds still. The camera takes the shortest
+// rotation, zooms geometrically and moves its target in a straight line;
+// a cut on at both keyframes moves its plane smoothly. Switches (a cut
+// turning on or off, its mode, which annotations show) take effect at the
+// next keyframe. EaseInOut slows to a stop at every keyframe.
+inline std::optional<SceneState> StateAt(const std::vector<Keyframe>& keys, double time, Easing easing,
+                                         int projection = CAMERA_PERSPECTIVE) {
     if (keys.empty()) return std::nullopt;
-    if (position <= keys.front().position) return CameraFrom(keys.front(), projection);
-    if (position >= keys.back().position) return CameraFrom(keys.back(), projection);
-    const auto next = std::upper_bound(keys.begin(), keys.end(), position,
-                                       [](double p, const Keyframe& k) { return p < k.position; });
+    if (time <= keys.front().time) return StateFrom(keys.front(), projection);
+    if (time >= keys.back().time) return StateFrom(keys.back(), projection);
+    const auto next = std::upper_bound(keys.begin(), keys.end(), time,
+                                       [](double t, const Keyframe& k) { return t < k.time; });
     const Keyframe& a = *std::prev(next);
     const Keyframe& b = *next;
-    const double span = b.position - a.position;
-    double s = span > 0 ? (position - a.position) / span : 1;
+    const double span = b.time - a.time;
+    double s = span > 0 ? (time - a.time) / span : 1;
     if (easing == Easing::EaseInOut) s = CameraViewEase(s);
     const float t = static_cast<float>(s);
     Quaternion to = b.orientation;
     if (a.orientation.x * to.x + a.orientation.y * to.y + a.orientation.z * to.z + a.orientation.w * to.w < 0)
         to = {-to.x, -to.y, -to.z, -to.w};
-    Keyframe mixed;
+    Keyframe mixed = a;
     mixed.orientation = QuaternionNormalize(QuaternionSlerp(a.orientation, to, t));
     mixed.target = Vector3Lerp(a.target, b.target, t);
     mixed.distance = std::exp(std::lerp(std::log(std::max(a.distance, 1e-12f)), std::log(std::max(b.distance, 1e-12f)), t));
     mixed.fovy = std::lerp(a.fovy, b.fovy, t);
-    return CameraFrom(mixed, projection);
+    if (a.clip && b.clip) {
+        mixed.clip_point = Vector3Lerp(a.clip_point, b.clip_point, t);
+        const Vector3 normal = Vector3Lerp(a.clip_normal, b.clip_normal, t);
+        mixed.clip_normal = Vector3Length(normal) > 1e-6f ? Vector3Normalize(normal) : a.clip_normal;
+    }
+    return StateFrom(mixed, projection);
+}
+inline std::optional<Camera3D> CameraAt(const std::vector<Keyframe>& keys, double time, Easing easing,
+                                        int projection = CAMERA_PERSPECTIVE) {
+    if (auto state = StateAt(keys, time, easing, projection)) return state->camera;
+    return std::nullopt;
 }
 
 inline void SortKeyframes(std::vector<Keyframe>& keys) {
-    std::stable_sort(keys.begin(), keys.end(), [](const Keyframe& a, const Keyframe& b) { return a.position < b.position; });
+    std::stable_sort(keys.begin(), keys.end(), [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
 }
 
-// Video timing: each shown frame is held for seconds_per_frame.
+// Video timing: each shown frame is held for seconds_per_frame, or, with a
+// total length, the frames share it evenly (a single frame can then fill a
+// whole movie, such as an orbit around one converged model).
 struct Timing {
     int frames = 1;              // shown frames in the movie
     double fps = 30;             // video frames per second
     double seconds_per_frame = .2;
+    double total_seconds = 0;    // > 0: the movie's length instead
     int VideoFrames() const {
-        return std::max(1, static_cast<int>(std::lround(std::max(1, frames) * seconds_per_frame * fps)));
+        const double seconds = total_seconds > 0 ? total_seconds : std::max(1, frames) * seconds_per_frame;
+        return std::max(1, static_cast<int>(std::lround(seconds * fps)));
     }
     double Seconds() const { return VideoFrames() / fps; }
+    // Video frames per shown frame.
+    double PerFrame() const {
+        return std::max(1e-9, total_seconds > 0 ? static_cast<double>(VideoFrames()) / std::max(1, frames) : seconds_per_frame * fps);
+    }
     // Where video frame n falls, in shown frames (for the camera), and the
     // shown frame it displays.
-    double Position(int n) const {
-        const double perFrame = std::max(1e-9, seconds_per_frame * fps);
-        return std::min(static_cast<double>(frames - 1), n / perFrame);
-    }
+    double Position(int n) const { return std::min(static_cast<double>(std::max(0, frames - 1)), n / PerFrame()); }
     int Frame(int n) const {
-        const double perFrame = std::max(1e-9, seconds_per_frame * fps);
-        return std::clamp(static_cast<int>(std::floor(n / perFrame + 1e-9)), 0, std::max(0, frames - 1));
+        return std::clamp(static_cast<int>(std::floor(n / PerFrame() + 1e-9)), 0, std::max(0, frames - 1));
     }
 };
 

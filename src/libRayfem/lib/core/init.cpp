@@ -214,7 +214,7 @@ InitResult init(const WindowParams& parameters) {
         if(parameters.host.empty() || parameters.host.find_first_of(" \t\r\n/[]")!=std::string::npos || parameters.host.find('\0')!=std::string::npos || parameters.executable.find('\0')!=std::string::npos)
             {result.error="Supply a host name or IP address without a URL or brackets.";return result;}
         if(parameters.width<960 || parameters.width>7680 || parameters.height<640 || parameters.height>4320 ||
-           parameters.fps<1 || parameters.fps>240 || parameters.history<1 || parameters.history>10000 ||
+           parameters.fps<1 || parameters.fps>240 || parameters.history<1 || parameters.history>1000000 ||
            parameters.timeout_ms<100 || parameters.timeout_ms>60000)
             {result.error="Invalid window, frame-rate, history, or timeout setting.";return result;}
         const auto deadline=Clock::now()+std::chrono::milliseconds(parameters.timeout_ms);

@@ -24,16 +24,34 @@ The **Scale** selector offers **Linear** (default), **Signed log**, and **ZScale
 
 ZScale takes up to 1,000 deterministic samples spread throughout the selected field volume, including clipped regions. This samples reference-cell lattices and FE nodes; it approximates the distribution and is not weighted by physical volume. Material exclusions still apply. Flow uses its whole-volume magnitude distribution; 2D heatmaps use their valid plane samples. Scalar profile and tracking axes remain unchanged. Library consumers can set `RenderOptions::color_scale`, or use `ResolveColorScale`, `ColorScaleFraction`, and `ColorScaleValue` from `libRayfem/mesh/color_scale.hpp`. To reproduce the viewer's volume-based limits, request `FieldRangeOptions::distribution_samples`, resolve the mapping from the resulting `FieldRange::samples`, then call `ApplyFieldColorRange(surface, mapping)`.
 
+## Toolbar
+
+The toolbar keeps to one row: **Fit** and **Spin** (with its menu), the analysis tools (Pick DOF, 1D and 2D profiles, Surface trace, Flow, Annotate), the Tracks and Plots panels, and **Export** at the right, whose menu holds **Figure…** (Ctrl/Cmd+E) and **Movie…**. When the labels do not fit, every button shows only its icon; hover for its name.
+
+## Annotations
+
+**Annotate** opens a window for lines and labels on the model. **Line** then two clicks on the surface draws a line between the points; **Label** then one click places text there. Each annotation has a visibility checkbox, a color, editable text (optional for a line, shown at its middle) and exact coordinates; Esc cancels placing. Annotations are drawn in the view and in movies, in world coordinates, so they stay put across frames.
+
 ## Movies
 
-**Movie** in the toolbar opens a window that exports the frames the timeline shows (the funnel filter chooses them) as an H.264 MP4. It needs an `ffmpeg` executable, found on `PATH`, in the usual Homebrew and system locations, or named by `RAYFEM_FFMPEG`; it uses libx264 when available and otherwise the platform's hardware encoder. Nothing is built into RayFEM.
+**Export → Movie…** opens a window that exports the frames the timeline shows (the funnel filter chooses them) as an H.264 MP4 — a single frame works too, for example one converged model. It needs an `ffmpeg` executable, found on `PATH`, in the usual Homebrew and system locations, or named by `RAYFEM_FFMPEG`; it uses libx264 when available and otherwise the platform's hardware encoder. Nothing is built into RayFEM.
 
-- **Frames:** a range of the shown frames, the video rate (24, 30 or 60 fps) and how long each frame stays on screen.
-- **Camera:** keyframes record the view on screen at the frame on screen. Step to a frame, arrange the view, then **Add keyframe here**; each keyframe can be revisited, replaced with the current view or removed. Between keyframes the camera turns along the shortest rotation, zooms geometrically and moves its target in a straight line, easing in and out at each keyframe or at constant speed. Before the first and after the last keyframe it holds still; with none, it keeps the view it has when the export starts. **Spin the view** adds the toolbar spin (its axis and rate) on top.
-- **Preview:** scrub through the movie; the view shows each moment's frame and camera.
+- **Frames:** a range of the shown frames and the video rate (24, 30 or 60 fps). **Per frame** holds each frame for a set time; **Total** sets the movie's length and the frames share it evenly, so one frame can fill the whole movie.
+- **Keyframes:** keyframes sit on the movie's own timeline, in seconds. Scrub the preview to a moment (the view shows that moment's frame and scene), arrange the camera, the cut (View → Clipping) and which annotations show, then **Add keyframe here**. Each keyframe can be moved in time, revisited, replaced with the scene on screen or removed. Between keyframes the camera turns along the shortest rotation, zooms geometrically and moves its target in a straight line, and a cut on at both keyframes moves and turns its plane; a cut switching on or off, its mode, and which annotations show change at the next keyframe. Motion eases in and out at each keyframe or keeps a constant speed. Before the first and after the last keyframe the scene holds still; with none, the movie keeps the view it has when the export starts.
+- **Spin the view** turns the camera about the axis chosen in the toolbar's Spin menu, a set number of turns over the movie; whole turns loop seamlessly. One frame, a total length and one turn make an orbit.
 - **Output:** size (rounded down to even numbers), optional 2× supersampling, quality as x264's constant rate factor (18 looks lossless), and the file.
 
-The export renders each frame offscreen as figures do, without the selection, profile guides or reference plane unless it is kept. The window stays open while you work, so keyframes can be placed from the live view; frames being exported are kept in the history until the export ends.
+The export renders each frame offscreen as figures do, without the selection, profile guides or reference plane unless it is kept; a cut that moves rebuilds the surface for every frame, so it takes longer. The window stays open while you work, so keyframes can be arranged from the live view; frames being exported stay in the history until the export ends.
+
+## History
+
+The viewer keeps up to 1,000 frames and about 2 GiB of field and mesh data by default (`--history` and `--history-mib`, or the timeline's **History** button). When either limit is reached, frames are evicted by the policy set there:
+
+- **Oldest first**, or **Thin older frames**: the newest half of the capacity stays dense and older frames thin to every nth, then every n²th, and so on, so a long run stays represented end to end.
+- **Evict last:** frames tagged with chosen tags, or frames the timeline filter shows, go only after every other frame. For example, with the filter discarding everything but converged and accepted frames, protecting *accepted* makes the history evict converged frames once full; protecting both evicts everything else first.
+- **Pinned** frames are never evicted: the pin button beside the filter (or `P` over the viewport) pins the frame on screen, and the timeline marks pinned frames. The frame viewed while paused and frames a movie is exporting also stay.
+
+The History popover reports the frame count, memory estimate, pinned frames and how many have been evicted.
 
 ## Exercise the viewer
 
@@ -192,7 +210,7 @@ Element boundaries follow the original finite element edges through their curved
 
 The cutting modes follow GLVis's distinction: **cut through elements** adds an interior section with sampled field values; **whole elements** retains only cells whose corners lie behind the plane and displays their newly exposed faces. Cut-through offers two algorithms: **Refined** intersects mapped volume subdivisions and is intended for curved and NURBS geometry; **Planar** intersects original corner edges and is faster for planar-faced meshes. The planar approximation can differ visibly on curved meshes. Refinement improves the curved approximation; cuts retain the half-space where `dot(position - plane.point, plane.normal) <= 0`. The CPU APIs are in `libRayfem/mesh/clipping.hpp`.
 
-The viewer retains at most 120 frames by default, also bounded by a 256 MiB retention estimate covering field coefficients, finite-element bookkeeping, and distinct shared meshes; `--history` adjusts the frame limit. Shared geometry is counted once. This estimate is not an exact allocator or total process-memory limit, and the viewer keeps at least one complete frame. Its receive queue holds at most 64 complete frames or 128 MiB and drops the oldest complete frames when overloaded. The status panel reports these drops. Mesh registration storage is limited to 16 meshes or 128 MiB; re-register a mesh if its registration is evicted. Each frame supports up to 64 unique named fields, with names up to 255 bytes, and each packet has a 64 MiB payload limit. Rapid streams can outrun rendering: a displayed frame rate is distinct from the producer's send rate. For persistent storage or exact replay of an entire long run, keep simulation output separately.
+The viewer retains at most 1,000 frames by default, also bounded by a 2 GiB retention estimate covering field coefficients, finite-element bookkeeping, and distinct shared meshes (see [History](#history) for limits and eviction). Shared geometry is counted once. This estimate is not an exact allocator or total process-memory limit, and the viewer keeps at least one complete frame. Its receive queue holds at most 64 complete frames or 128 MiB and drops the oldest complete frames when overloaded. The status panel reports these drops. Mesh registration storage is limited to 16 meshes or 128 MiB; re-register a mesh if its registration is evicted. Each frame supports up to 64 unique named fields, with names up to 255 bytes, and each packet has a 64 MiB payload limit. Rapid streams can outrun rendering: a displayed frame rate is distinct from the producer's send rate. For persistent storage or exact replay of an entire long run, keep simulation output separately.
 
 The streaming transport is intended for trusted simulations. It is not an authenticated public service. The example uses serial MFEM meshes and grid functions; distributed parallel mesh assembly is outside this example's scope.
 

@@ -84,7 +84,7 @@ NB_MODULE(_rayfem, m) {
             }
             return std::make_tuple(result.status, result.executable, result.error);
         }, "host"_a = "127.0.0.1", "port"_a = 5555, "control_port"_a = 0, "width"_a = 1440, "height"_a = 900, "fps"_a = 60,
-        "history"_a = 120, "timeout_ms"_a = 5000, "executable"_a = "",
+        "history"_a = 1000, "timeout_ms"_a = 5000, "executable"_a = "",
         "Start (or verify) a viewer. Returns (status, executable, error).");
 
     m.def("shutdown", [](const std::string& host, int port, int control_port, int timeout_ms) {

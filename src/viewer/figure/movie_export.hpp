@@ -1,9 +1,13 @@
 #pragma once
 
-// The Movie window: the frames the timeline shows, camera keyframes placed
-// from the live view, a preview, and H.264 export through ffmpeg. It is a
-// floating window, not a modal dialog, so the view stays usable for placing
-// keyframes.
+// The Movie window: the frames the timeline shows, scene keyframes placed
+// from the live view on the movie's own timeline, a preview, and H.264
+// export through ffmpeg. It is a floating window, not a modal dialog, so the
+// view stays usable for arranging each keyframe.
+//
+// Keyframes sit at times in the movie, not at data frames, so a movie of a
+// single frame (one converged model, say) can still move the camera, cut and
+// show annotations freely; with several frames, the frames play underneath.
 
 #include "figure/movie.hpp"
 #include "ui/theme.hpp"
@@ -17,25 +21,25 @@
 namespace RayFEM::UI::Movie {
 
 // What the viewer provides. Positions count the frames the timeline shows,
-// from 0; during an export they count the frames captured when it started.
+// from 0; during an export, ready() counts the frames captured when it started.
 struct Host {
-    std::function<int()> frames;                      // frames the timeline shows
-    std::function<int()> current;                     // the shown frame on screen
-    std::function<std::string(int)> label;            // a shown frame's caption
-    std::function<Camera3D()> camera;                 // the live camera
-    std::function<Vector2()> viewport;                // the view's size in pixels
-    std::function<void(int, const Camera3D&)> show;   // put a shown frame and camera on screen
-    std::function<int(int, int)> capture;             // keep shown frames first..last for an export; returns how many
-    std::function<bool(int)> ready;                   // select a captured frame; true once its surface is built
+    std::function<int()> frames;                       // frames the timeline shows
+    std::function<std::string(int)> label;             // a shown frame's caption
+    std::function<SceneState()> state;                 // the live camera, cut and annotations
+    std::function<void(int, const SceneState&)> apply; // show a scene, at a shown frame unless -1
+    std::function<Vector2()> viewport;                 // the view's size in pixels
+    std::function<int(int, int)> capture;              // keep shown frames first..last for an export; returns how many
+    std::function<bool(int)> ready;                    // select a captured frame; true once its surface is built
     std::function<bool(const Camera3D&, int, int, int, std::vector<unsigned char>&)> render; // camera, width, height, supersample, RGBA
-    std::function<void(Camera3D&, double)> spin;      // turn a camera by the view's spin over some seconds
-    std::function<void()> release;                    // the export ended: drop the capture
+    std::function<void(Camera3D&, double)> spin;       // turn a camera by radians about the Spin menu's axis
+    std::function<void()> release;                     // the export ended: drop the capture
 };
 
 class Exporter {
 public:
     void Open(const Host& host) {
         open = true;
+        focus = true;
         if (!discovered) { encoder = Encoder::Discover(); discovered = true; }
         const int count = host.frames();
         if (last < 0 || last >= count) last = std::max(0, count - 1);
@@ -52,31 +56,34 @@ public:
     bool Failed() const { return failed; }
     std::vector<Keyframe>& Keyframes() { return keys; }
 
-    // Scripted use: export the current settings now.
-    void Export(const Host& host, const std::string& path) {
-        std::snprintf(output, sizeof(output), "%s", path.c_str());
-        Start(host);
-    }
+    // Scripted use: set up, then export.
     void Settings(int first_frame, int last_frame, double fps_value, double seconds, int w, int h, int super) {
         first = first_frame; last = last_frame; fps = fps_value; secondsPerFrame = seconds;
         width = EvenSize(w); height = EvenSize(h); supersample = super;
     }
-    void SetSpin(bool on) { includeSpin = on; }
+    // A total length in seconds instead of seconds per frame; 0 restores per frame.
+    void SetLength(double seconds) { totalLength = seconds > 0; if (seconds > 0) totalSeconds = seconds; }
+    void SetSpin(bool on, double turns = 1) { includeSpin = on; spinTurns = turns; }
+    void Export(const Host& host, const std::string& path) {
+        std::snprintf(output, sizeof(output), "%s", path.c_str());
+        Start(host);
+    }
+
     // Advance an export; call every frame, even while the window is closed.
     void Step(const Host& host) {
         if (!job) return;
         Job& j = *job;
         const double budget = GetTime() + 1.0 / 20;
         while (j.n < j.total) {
-            const int frame = j.timing.Frame(j.n);
-            if (!host.ready(frame)) {
-                if (GetTime() - j.waiting > 120) Finish(host, "Timed out building frame " + std::to_string(frame + 1));
+            const SceneState scene = StateFor(j, j.n);
+            // The scene first: a cut that moves needs its surface rebuilt.
+            host.apply(-1, scene);
+            if (!host.ready(j.timing.Frame(j.n))) {
+                if (GetTime() - j.waiting > 120) Finish(host, "Timed out building frame " + std::to_string(j.timing.Frame(j.n) + 1));
                 return;
             }
-            const Camera3D view = CameraFor(j, j.n);
-            host.show(-1, view);
             std::string error;
-            if (!host.render(view, j.width, j.height, j.supersample, j.rgba)) { Finish(host, "Could not render the frame"); return; }
+            if (!host.render(scene.camera, j.width, j.height, j.supersample, j.rgba)) { Finish(host, "Could not render the frame"); return; }
             if (!j.writer.Write(j.rgba, error)) { Finish(host, error); return; }
             ++j.n;
             j.waiting = GetTime();
@@ -91,8 +98,9 @@ public:
         Step(host);
         if (!open) return;
         const ImVec2 display = ImGui::GetIO().DisplaySize;
-        ImGui::SetNextWindowSize({430, std::min(720.f, display.y - 120)}, ImGuiCond_Appearing);
-        ImGui::SetNextWindowPos({display.x - 470, 100}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize({440, std::min(760.f, display.y - 120)}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowPos({display.x - 480, 100}, ImGuiCond_Appearing);
+        if (focus) { ImGui::SetNextWindowFocus(); focus = false; }
         if (!ImGui::Begin(ICON_FA_FILM "  Movie###movie", &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse)) {
             ImGui::End();
             return;
@@ -103,8 +111,7 @@ public:
         ImGui::BeginChild("movie settings", {0, -footer});
         ImGui::BeginDisabled(job != nullptr);
         Frames(host, count);
-        Camera(host, count);
-        Preview(host, count);
+        Timeline(host, count);
         Output();
         ImGui::EndDisabled();
         ImGui::EndChild();
@@ -113,17 +120,20 @@ public:
     }
 
 private:
-    struct Job {
+    // What decides the scene at each moment.
+    struct Plan {
         Timing timing;
+        std::vector<Keyframe> keys;
+        Easing easing = Easing::EaseInOut;
+        SceneState start;
+        bool spin = false;
+        double turns = 1;
+    };
+    struct Job : Plan {
         int n = 0, total = 0, width = 0, height = 0, supersample = 1;
         double waiting = 0;
         Writer writer;
         std::vector<unsigned char> rgba;
-        std::vector<Keyframe> keys;
-        Easing easing = Easing::EaseInOut;
-        Camera3D start{};
-        int first = 0;
-        bool spin = false;
         std::string path;
         int restoreFrame = 0;
     };
@@ -132,22 +142,36 @@ private:
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", text);
     }
 
-    Timing MovieTiming() const { return {last - first + 1, fps, secondsPerFrame}; }
+    Timing MovieTiming() const { return {last - first + 1, fps, secondsPerFrame, totalLength ? totalSeconds : 0}; }
+    double PreviewTime() const { return previewFrame / fps; }
 
-    // The camera for video frame n: the keyframe path (positions count shown
-    // frames, so the path is offset by the first frame), or the view when the
-    // export started, then the view's spin if included.
-    Camera3D CameraFor(const Job& j, int n) const {
-        const double position = j.first + j.timing.Position(n);
-        Camera3D view = CameraAt(j.keys, position, j.easing, j.start.projection).value_or(j.start);
-        if (j.spin && spinner) spinner(view, n / j.timing.fps);
-        return view;
+    // The scene for video frame n: the keyframes at its time, or the scene
+    // when the export started, then the spin: turns spread over the whole
+    // movie, so a whole number of turns loops seamlessly.
+    SceneState StateFor(const Plan& j, int n) const {
+        SceneState scene = StateAt(j.keys, n / j.timing.fps, j.easing, j.start.camera.projection).value_or(j.start);
+        if (j.spin && spinner) spinner(scene.camera, 2 * PI * j.turns * n / j.timing.VideoFrames());
+        return scene;
+    }
+    Plan Probe(const SceneState& start) const {
+        Plan probe;
+        probe.timing = MovieTiming(); probe.keys = keys; probe.easing = easing; probe.start = start;
+        probe.spin = includeSpin; probe.turns = spinTurns;
+        return probe;
+    }
+    // Show the movie at video frame n in the view.
+    void Preview(const Host& host, int n, const SceneState& start) {
+        const auto timing = MovieTiming();
+        previewFrame = std::clamp(n, 0, timing.VideoFrames() - 1);
+        spinner = host.spin;
+        host.apply(first + timing.Frame(previewFrame), StateFor(Probe(start), previewFrame));
     }
 
     void Frames(const Host& host, int count) {
         if (!BeginSection("Frames")) return;
         if (count == 0) { ImGui::TextDisabled("No frames yet."); EndSection(); return; }
-        ImGui::TextWrapped("%d frame%s shown on the timeline; the funnel filter chooses them.", count, count == 1 ? "" : "s");
+        ImGui::TextWrapped("%d frame%s shown on the timeline; the funnel filter chooses them. A single frame works too.",
+                           count, count == 1 ? "" : "s");
         last = std::clamp(last, 0, count - 1);
         first = std::clamp(first, 0, last);
         int from = first + 1, to = last + 1;
@@ -162,88 +186,110 @@ private:
         FieldLabel("Video rate");
         int rate = fps == 24 ? 0 : fps == 60 ? 2 : 1;
         if (Segmented("##movie_fps", &rate, {"24 fps", "30 fps", "60 fps"})) fps = rate == 0 ? 24 : rate == 2 ? 60 : 30;
-        FieldLabel("Seconds per frame");
-        float seconds = static_cast<float>(secondsPerFrame);
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::DragFloat("##movie_hold", &seconds, .005f, 1.0f / 60, 10, "%.3f s", ImGuiSliderFlags_AlwaysClamp))
-            secondsPerFrame = seconds;
-        Tip("How long each frame stays on screen. The camera moves continuously between keyframes regardless.");
+        FieldLabel("Length");
+        int mode = totalLength ? 1 : 0;
+        if (Segmented("##movie_length_mode", &mode, {"Per frame", "Total"})) totalLength = mode == 1;
+        if (totalLength) {
+            float seconds = static_cast<float>(totalSeconds);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##movie_total", &seconds, .1f, .5f, 3600, "%.1f s", ImGuiSliderFlags_AlwaysClamp))
+                totalSeconds = seconds;
+            Tip("The movie's length; its frames share it evenly. A single frame then fills the whole movie.");
+        } else {
+            float seconds = static_cast<float>(secondsPerFrame);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##movie_hold", &seconds, .005f, 1.0f / 60, 10, "%.3f s each", ImGuiSliderFlags_AlwaysClamp))
+                secondsPerFrame = seconds;
+            Tip("How long each frame stays on screen. The scene moves continuously between keyframes regardless.");
+        }
         const auto timing = MovieTiming();
         ImGui::TextDisabled("%.1f s, %d video frames", timing.Seconds(), timing.VideoFrames());
         EndSection();
     }
 
-    void Camera(const Host& host, int count) {
-        if (!BeginSection("Camera", keys.empty() ? nullptr : std::to_string(keys.size()).c_str())) return;
-        FieldLabel("Between keyframes");
-        int ease = easing == Easing::Linear ? 1 : 0;
-        if (Segmented("##movie_easing", &ease, {"Ease in and out", "Constant speed"}))
-            easing = ease == 1 ? Easing::Linear : Easing::EaseInOut;
+    void Timeline(const Host& host, int count) {
+        if (!BeginSection("Keyframes", keys.empty() ? nullptr : std::to_string(keys.size()).c_str())) return;
+        if (count == 0) { EndSection(); return; }
+        const auto timing = MovieTiming();
+        // The preview scrubber picks the moment new keyframes go at.
+        int n = std::clamp(previewFrame, 0, timing.VideoFrames() - 1);
+        ImGui::SetNextItemWidth(-1);
+        const bool moved = ImGui::SliderInt("##movie_preview", &n, 0, timing.VideoFrames() - 1, "", ImGuiSliderFlags_AlwaysClamp);
+        // Without keyframes the movie keeps the view it starts with; the view
+        // when scrubbing starts stands in for it and returns afterwards.
+        if (ImGui::IsItemActivated()) scrubBase = host.state();
+        const bool released = ImGui::IsItemDeactivated();
+        Tip("Scrub through the movie: the view shows each moment's frame and scene. Keyframes are added at this moment.");
+        if (moved && scrubBase) Preview(host, n, *scrubBase);
+        if (released && scrubBase) {
+            if (keys.empty()) host.apply(-1, *scrubBase);
+            scrubBase.reset();
+        }
+        ImGui::TextDisabled("%.2f s of %.2f s · %s", PreviewTime(), timing.Seconds(),
+                            host.label(first + timing.Frame(previewFrame)).c_str());
+
+        if (ImGui::Button(ICON_FA_PLUS "  Add keyframe here")) {
+            const double at = PreviewTime();
+            std::erase_if(keys, [&](const Keyframe& k) { return std::abs(k.time - at) < .5 / fps; });
+            keys.push_back(KeyframeFrom(host.state(), at));
+            SortKeyframes(keys);
+        }
+        Tip("Record the view on screen now (camera, cut and visible annotations) at the preview's moment. "
+            "A keyframe at the same moment is replaced.");
+        if (!keys.empty()) { ImGui::SameLine(); if (ImGui::Button("Clear")) keys.clear(); }
         if (keys.empty())
-            ImGui::TextWrapped("No keyframes: the camera keeps the view it has when the export starts. "
-                               "Step to a frame, arrange the view, then add a keyframe.");
+            ImGui::TextWrapped("No keyframes: the movie keeps the view it has when the export starts. Scrub to a moment, "
+                               "arrange the camera, cut and annotations, then add a keyframe; add another at a later moment "
+                               "and the scene moves between them.");
         int remove = -1;
+        bool retimed = false;
         for (size_t i = 0; i < keys.size(); ++i) {
+            auto& key = keys[i];
             ImGui::PushID(static_cast<int>(i));
-            const int at = std::clamp(static_cast<int>(std::lround(keys[i].position)), 0, std::max(0, count - 1));
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("%zu", i + 1);
-            ImGui::SameLine(28);
-            ImGui::TextUnformatted(count ? host.label(at).c_str() : "");
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 3*ImGui::GetFrameHeight() - 16);
-            if (ImGui::Button(ICON_FA_LOCATION_ARROW)) host.show(at, CameraFrom(keys[i]));
-            Tip("Go to this keyframe's frame and view");
-            ImGui::SameLine();
-            if (ImGui::Button(ICON_FA_CAMERA)) {
-                keys[i] = KeyframeFrom(host.camera(), host.current());
-                SortKeyframes(keys);
+            float seconds = static_cast<float>(key.time);
+            ImGui::SetNextItemWidth(72);
+            if (ImGui::DragFloat("##time", &seconds, .02f, 0, static_cast<float>(timing.Seconds()), "%.2f s", ImGuiSliderFlags_AlwaysClamp)) {
+                key.time = seconds;
+                retimed = true;
             }
-            Tip("Replace with the frame and view on screen now");
+            Tip("When this keyframe happens; drag to move it");
+            ImGui::SameLine();
+            std::string what;
+            if (timing.frames > 1) what = host.label(first + timing.Frame(static_cast<int>(std::lround(key.time * fps))));
+            if (key.clip) what += what.empty() ? ICON_FA_SCISSORS " cut" : "  " ICON_FA_SCISSORS;
+            if (!key.annotations.empty()) what += (what.empty() ? "" : "  ") + std::string(ICON_FA_PEN " ") + std::to_string(key.annotations.size());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", what.c_str());
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 3*ImGui::GetFrameHeight() - 16);
+            if (ImGui::Button(ICON_FA_LOCATION_ARROW)) {
+                previewFrame = std::clamp(static_cast<int>(std::lround(key.time * fps)), 0, timing.VideoFrames() - 1);
+                host.apply(first + timing.Frame(previewFrame), StateFrom(key, host.state().camera.projection));
+            }
+            Tip("Go to this keyframe: its moment, frame and scene");
+            ImGui::SameLine();
+            if (ImGui::Button(ICON_FA_CAMERA)) key = KeyframeFrom(host.state(), key.time);
+            Tip("Replace with the scene on screen now");
             ImGui::SameLine();
             if (ImGui::Button(ICON_FA_TRASH_CAN)) remove = static_cast<int>(i);
             Tip("Remove this keyframe");
             ImGui::PopID();
         }
         if (remove >= 0) keys.erase(keys.begin() + remove);
-        ImGui::BeginDisabled(count == 0);
-        if (ImGui::Button(ICON_FA_PLUS "  Add keyframe here")) {
-            const double at = host.current();
-            std::erase_if(keys, [&](const Keyframe& k) { return std::abs(k.position - at) < .5; });
-            keys.push_back(KeyframeFrom(host.camera(), at));
-            SortKeyframes(keys);
-        }
-        ImGui::EndDisabled();
-        Tip("The camera on screen now, at the frame on screen now. A keyframe at the same frame is replaced.");
-        if (!keys.empty()) { ImGui::SameLine(); if (ImGui::Button("Clear")) keys.clear(); }
+        // Reorder once a time drag ends, so rows do not jump under the pointer.
+        if (retimed) pendingSort = true;
+        if (pendingSort && !ImGui::IsAnyItemActive()) { SortKeyframes(keys); pendingSort = false; }
+        FieldLabel("Between keyframes");
+        int ease = easing == Easing::Linear ? 1 : 0;
+        if (Segmented("##movie_easing", &ease, {"Ease in and out", "Constant speed"}))
+            easing = ease == 1 ? Easing::Linear : Easing::EaseInOut;
         Switch("Spin the view", &includeSpin);
-        Tip("Add the spin set in the toolbar's Spin menu (axis and rate) on top of the keyframed camera.");
-        EndSection();
-    }
-
-    void Preview(const Host& host, int count) {
-        if (!BeginSection("Preview", nullptr, false)) return;
-        if (count == 0) { EndSection(); return; }
-        const auto timing = MovieTiming();
-        int n = std::clamp(previewFrame, 0, timing.VideoFrames() - 1);
-        ImGui::SetNextItemWidth(-1);
-        const bool moved = ImGui::SliderInt("##movie_preview", &n, 0, timing.VideoFrames() - 1, "", ImGuiSliderFlags_AlwaysClamp);
-        // The view when scrubbing starts: the movie's camera without
-        // keyframes, put back when scrubbing ends.
-        if (ImGui::IsItemActivated()) previewBase = host.camera();
-        const bool released = ImGui::IsItemDeactivated();
-        Tip("Scrub through the movie: the view shows each moment's frame and camera.");
-        ImGui::TextDisabled("%.2f s · %s", n / timing.fps, host.label(first + timing.Frame(n)).c_str());
-        if (moved && previewBase) {
-            previewFrame = n;
-            Job probe;
-            probe.timing = timing; probe.keys = keys; probe.easing = easing; probe.start = *previewBase;
-            probe.first = first; probe.spin = includeSpin;
-            spinner = host.spin;
-            host.show(first + timing.Frame(n), CameraFor(probe, n));
-        }
-        if (released && previewBase) {
-            if (keys.empty()) host.show(-1, *previewBase);
-            previewBase.reset();
+        Tip("Turn the camera about the axis chosen in the toolbar's Spin menu, on top of any keyframes.");
+        if (includeSpin) {
+            float turns = static_cast<float>(spinTurns);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::DragFloat("##movie_turns", &turns, .05f, -20, 20, "%.2f turns over the movie", ImGuiSliderFlags_AlwaysClamp))
+                spinTurns = turns;
+            Tip("Whole turns loop seamlessly. Negative turns go the other way.");
         }
         EndSection();
     }
@@ -312,14 +358,15 @@ private:
         if (!discovered) { encoder = Encoder::Discover(); discovered = true; }
         if (!encoder.Available()) { status = "No H.264 encoder: install ffmpeg"; failed = true; return; }
         auto next = std::make_unique<Job>();
+        const int restore = std::clamp(first + MovieTiming().Frame(previewFrame), 0, std::max(0, host.frames() - 1));
         const int captured = host.capture(first, last);
         if (captured <= 0) { status = "No frames to export"; failed = true; return; }
-        next->timing = {captured, fps, secondsPerFrame};
+        next->timing = {captured, fps, secondsPerFrame, totalLength ? totalSeconds : 0};
         next->total = next->timing.VideoFrames();
         next->width = EvenSize(width); next->height = EvenSize(height); next->supersample = supersample;
-        next->keys = keys; next->easing = easing; next->start = host.camera();
-        next->first = first; next->spin = includeSpin; next->path = output;
-        next->restoreFrame = host.current();
+        next->keys = keys; next->easing = easing; next->start = host.state();
+        next->spin = includeSpin; next->turns = spinTurns; next->path = output;
+        next->restoreFrame = restore;
         next->waiting = GetTime();
         next->rgba.resize(static_cast<size_t>(next->width) * next->height * 4);
         spinner = host.spin;
@@ -334,14 +381,14 @@ private:
 
     void Finish(const Host& host, const std::string& error) {
         if (!job) return;
-        const Camera3D start = job->start;
+        const SceneState start = job->start;
         const int frame = job->restoreFrame;
         const std::string path = job->path;
         const int frames = job->n;
         const double seconds = job->n / job->timing.fps;
         job.reset();
         host.release();
-        host.show(frame, start);
+        host.apply(frame, start);
         failed = !error.empty();
         if (failed) status = error;
         else {
@@ -351,17 +398,21 @@ private:
         }
     }
 
-    bool open = false, discovered = false;
+    bool open = false, focus = false, discovered = false;
     Encoder encoder;
     int first = 0, last = -1;
     double fps = 30, secondsPerFrame = .2;
+    bool totalLength = false;
+    double totalSeconds = 10;
     int width = 0, height = 0, supersample = 2, quality = 20;
     char output[512] = "rayfem-exports/movie.mp4";
     std::vector<Keyframe> keys;
     Easing easing = Easing::EaseInOut;
     bool includeSpin = false;
+    double spinTurns = 1;
     int previewFrame = 0;
-    std::optional<Camera3D> previewBase;
+    bool pendingSort = false;
+    std::optional<SceneState> scrubBase;
     std::function<void(Camera3D&, double)> spinner;
     std::unique_ptr<Job> job;
     std::string status;
