@@ -1,6 +1,7 @@
-# Build trees and local dependency installs
-build/
-build-*/
+# Build trees and local dependency installs (build-config/ is source)
+/build/
+/build-*/
+!/build-config/
 .rayfem-deps/
 
 # Python packaging and environments
