@@ -43,16 +43,6 @@ if build_viewer
         install_dir: bundle ? python_build.get_install_dir() / 'rayfem' / 'bin' : get_option('bindir'))
 endif
 
-if build_examples
-    executable('exampleClient', 'app/client.cpp',
-        dependencies: [app_dependencies, rayfem_dep],
-        cpp_args: cpp_args, c_args: c_args, link_args: link_args)
-
-    sandbox = executable('sandbox', 'app/sandbox.cpp',
-        dependencies: [app_dependencies, rayfem_dep],
-        cpp_args: cpp_args, c_args: c_args, link_args: link_args)
-endif
-
 if get_option('glvis_experiment')
     executable('glvisInt', 'app/demo.cpp',
         dependencies: [dependencies, app_dependencies],

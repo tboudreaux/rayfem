@@ -55,6 +55,9 @@ if not bundle
     meson.add_install_script(python_build, files('tools/install_dependency_headers.py'), header_install_args)
 endif
 subdir('src')
+if build_examples
+    subdir('examples')
+endif
 if get_option('python').enabled()
     subdir('python')
 endif

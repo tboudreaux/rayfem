@@ -28,7 +28,7 @@ Meson 1.8.2 and AppleClang were used for validation. Use a fresh `build-rayfem` 
 
 ```sh
 ./build-rayfem/src/RayFEM --port 5555
-./build-rayfem/src/exampleClient --geometry quad --order 4 --frames 300 --fps 30
+./build-rayfem/examples/exampleClient --geometry quad --order 4 --frames 300 --fps 30
 ```
 
 The example sends five named fields per frame: H1 temperature, discontinuous L2 scalar data, H1 vector velocity, a Nédélec H(curl) field, and a Raviart–Thomas H(div) field. Each frame also contains a displacement in the mesh's own geometry space. The geometry is registered once.
@@ -163,29 +163,29 @@ These commands provide small reproducible streams. Run them with the viewer alre
 
 ```sh
 # Curved quadrilaterals and triangles.
-./build-rayfem/src/exampleClient --geometry quad --order 5 --resolution 5 --frames 180
-./build-rayfem/src/exampleClient --geometry tri --order 4 --resolution 5 --frames 180
+./build-rayfem/examples/exampleClient --geometry quad --order 5 --resolution 5 --frames 180
+./build-rayfem/examples/exampleClient --geometry tri --order 4 --resolution 5 --frames 180
 
 # Curved hexahedra and tetrahedra.
-./build-rayfem/src/exampleClient --geometry hex --order 3 --resolution 3 --frames 120
-./build-rayfem/src/exampleClient --geometry tet --order 3 --resolution 3 --frames 120
+./build-rayfem/examples/exampleClient --geometry hex --order 3 --resolution 3 --frames 120
+./build-rayfem/examples/exampleClient --geometry tet --order 3 --resolution 3 --frames 120
 
 # Rapid streaming: simulation time still advances by --dt per frame.
-./build-rayfem/src/exampleClient --geometry quad --order 3 --frames 1000 --interval 0 --quiet
+./build-rayfem/examples/exampleClient --geometry quad --order 3 --frames 1000 --interval 0 --quiet
 
 # Original NURBS geometry is retained; --order controls the example fields.
-./build-rayfem/src/exampleClient --mesh-file subprojects/mfem/data/disc-nurbs.mesh --order 3 --frames 120
-./build-rayfem/src/exampleClient --mesh-file subprojects/mfem/data/beam-hex-nurbs.mesh --order 3 --frames 120
+./build-rayfem/examples/exampleClient --mesh-file subprojects/mfem/data/disc-nurbs.mesh --order 3 --frames 120
+./build-rayfem/examples/exampleClient --mesh-file subprojects/mfem/data/beam-hex-nurbs.mesh --order 3 --frames 120
 
 # Sphere to ellipsoid and back, with one mesh registration.
-./build-rayfem/src/exampleClient --mesh-file subprojects/mfem/data/ball-nurbs.mesh \
+./build-rayfem/examples/exampleClient --mesh-file subprojects/mfem/data/ball-nurbs.mesh \
   --motion ellipsoid --deformation 0.8 --frames 241 --dt 0.02617993877991494 --fps 30
 
 # Straight geometry and no displacement for analytic derivative checks.
-./build-rayfem/src/exampleClient --geometry hex --curvature 0 --no-displacement --frames 1
+./build-rayfem/examples/exampleClient --geometry hex --curvature 0 --no-displacement --frames 1
 
 # Three material bands for categorical coloring and analysis selection.
-./build-rayfem/src/exampleClient --geometry hex --resolution 3 --materials 3 --frames 120
+./build-rayfem/examples/exampleClient --geometry hex --resolution 3 --materials 3 --frames 120
 ```
 
 `--fps` and `--interval` are alternative ways to request the send cadence. `--interval 0` sends as quickly as projection, serialization, and transport permit. `--dt` controls simulation time independently. `--motion ellipsoid` starts from the reference geometry, reaches axis factors `(1+A, 1-A/2, 1+A/4)` at simulation time pi, and returns at 2pi (`A` is `--deformation`). With the ball mesh this is a sphere-to-ellipsoid cycle. `--deformation` controls the displacement amplitude, and `--no-displacement` leaves frames on the registered geometry. Imported meshes must be full-dimensional 2D or 3D meshes for this example's ND/RT spaces.
@@ -203,14 +203,14 @@ These are useful checks for the appropriate derivative view. On curved geometry,
 
 ## Moving-mesh diffusion example
 
-`src/app/sandbox.cpp` is a small MFEM solver that diffuses a smooth temperature field on an expanding and contracting square. It starts RayFEM automatically, or reuses the compatible viewer already listening:
+`examples/sandbox.cpp` is a small MFEM solver that diffuses a smooth temperature field on an expanding and contracting square. It starts RayFEM automatically, or reuses the compatible viewer already listening:
 
 ```sh
-./build-rayfem/src/sandbox
+./build-rayfem/examples/sandbox
 # Run the same calculation and numerical checks without a viewer or pacing.
-./build-rayfem/src/sandbox --no-stream
+./build-rayfem/examples/sandbox --no-stream
 # Compare diffusion on a fixed mesh.
-./build-rayfem/src/sandbox --no-stream --amplitude 0
+./build-rayfem/examples/sandbox --no-stream --amplitude 0
 ```
 
 The example streams one immutable reference mesh, then **Temperature**, **Mesh velocity**, and a displacement for every frame. A separate solver mesh moves according to `s(t) = 1 + amplitude*sin(2*pi*t/period)`. MFEM reassembles mass and diffusion matrices on that geometry and solves `(M_new + dt*K_new)*T_new = M_old*T_old` with backward Euler and conjugate gradients.
