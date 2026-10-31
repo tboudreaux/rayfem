@@ -367,7 +367,9 @@ struct Server::Impl {
         zsock_set_ipv6(pull, 1);
         zsock_set_linger(pull, 0);
         zsock_set_rcvtimeo(pull, 100);
-        zsock_set_rcvhwm(pull, 64);
+        // Few packets wait in libzmq: a full queue below stops reading, and
+        // the senders then wait instead of the viewer dropping frames.
+        zsock_set_rcvhwm(pull, 4);
         zsock_set_maxmsgsize(pull, Protocol::HeaderBytes + Protocol::MaxPayloadBytes);
         if (zsock_bind(pull, "%s", address.c_str()) < 0) {
             error("Cannot bind receiver to " + address); return;
@@ -393,13 +395,22 @@ struct Server::Impl {
         size_t mesh_bytes = 0;
         uint64_t use_sequence = 0;
         while (running) {
+            // While the decoded-frame queue is full, only the control socket is
+            // read; the stream waits in the network and in the senders.
+            bool full;
+            {
+                std::lock_guard lock(mutex);
+                full = receiving && !queue.empty() && (queue.size() >= MaxQueuedFrames || queued_bytes >= MaxQueuedBytes);
+            }
             zmq_pollitem_t sockets[] = {
-                {zsock_resolve(pull), 0, ZMQ_POLLIN, 0},
-                {control ? zsock_resolve(control) : nullptr, 0, ZMQ_POLLIN, 0}
+                {control ? zsock_resolve(control) : nullptr, 0, ZMQ_POLLIN, 0},
+                {zsock_resolve(pull), 0, ZMQ_POLLIN, 0}
             };
-            if (zmq_poll(sockets, control ? 2 : 1, 100) <= 0) continue;
-            if (control && (sockets[1].revents & ZMQ_POLLIN)) answerControl(control);
-            if (!(sockets[0].revents & ZMQ_POLLIN)) continue;
+            const int count = full ? (control ? 1 : 0) : 2;
+            if (count == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); continue; }
+            if (zmq_poll(control ? sockets : sockets + 1, control ? count : count - 1, full ? 2 : 100) <= 0) continue;
+            if (control && (sockets[0].revents & ZMQ_POLLIN)) answerControl(control);
+            if (full || !(sockets[1].revents & ZMQ_POLLIN)) continue;
             FramePtr packet(zframe_recv(pull));
             if (!packet) continue;
             if (zsock_rcvmore(pull)) {
@@ -473,11 +484,6 @@ struct Server::Impl {
                 mesh->last_frame = header.metadata.frame_index;
                 frame.queued_bytes = payload.size() + mesh->data.size();
                 std::lock_guard lock(mutex);
-                while (!queue.empty() && (queue.size() >= MaxQueuedFrames || queued_bytes + frame.queued_bytes > MaxQueuedBytes)) {
-                    queued_bytes -= queue.front().queued_bytes;
-                    queue.pop_front();
-                    ++dropped;
-                }
                 queued_bytes += frame.queued_bytes;
                 queue.push_back(std::move(frame));
             } catch (const std::exception& exception) { error(std::string("Packet rejected: ") + exception.what()); }

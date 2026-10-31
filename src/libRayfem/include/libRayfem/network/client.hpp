@@ -43,6 +43,11 @@ public:
     const std::string& getLastError() const;
     // Whether a viewer is connected now (see StreamClient).
     bool connected() { return m_stream->connected(); }
+    // Sending in the background; see StreamClient::startQueue. A frame is
+    // encoded before sendFrame returns, so the fields may change right after.
+    void startQueue(const StreamQueue& options = {}) { m_stream->startQueue(options); }
+    bool flush(int timeout_ms = -1) { return m_stream->flush(timeout_ms); }
+    StreamQueueStats queueStats() const { return m_stream->queueStats(); }
     // The MFEM-free client underneath.
     StreamClient& stream() { return *m_stream; }
 private:

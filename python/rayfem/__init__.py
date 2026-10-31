@@ -26,7 +26,7 @@ from ._viewer import viewer_executable
 
 __version__ = "0.1.0"
 __all__ = [
-    "Axis", "Client", "Field", "InitStatus", "RayFEMError", "Schema", "ShutdownStatus", "Tag", "Value",
+    "Axis", "Client", "Field", "InitStatus", "QueueStats", "RayFEMError", "Schema", "ShutdownStatus", "Tag", "Value",
     "ViewerStats", "init", "shutdown", "stats", "viewer_executable",
 ]
 
@@ -186,20 +186,39 @@ def _field(item: FieldLike) -> tuple[str, str, Any]:
     return (name, space, _float64(values))
 
 
+@dataclass(frozen=True)
+class QueueStats:
+    """Counters of a client's send queue (see :meth:`Client.start_queue`)."""
+    pending: int        # packets waiting for the background thread
+    pending_bytes: int  # bytes encoded and not yet written to the network
+    sent: int           # packets handed to the network
+    dropped: int        # frames discarded or refused because the queue was full
+    failed: int         # packets that could not be sent
+
+
 class Client:
     """Sends meshes and frames to a viewer at ``host:port``.
 
-    Sends are queued for the viewer; a refused send raises
-    :class:`RayFEMError`. A send is refused for invalid input, when no viewer
-    is listening at ``host:port`` (it closed, or moved to another host or
-    port from its session menu), and for a frame whose mesh the viewer no
-    longer has because its listener restarted; send the mesh again then. The
-    viewer validates everything it decodes and reports problems in its window.
+    A refused send raises :class:`RayFEMError`. A send is refused for invalid
+    input, when no viewer is listening at ``host:port`` (it closed, or moved
+    to another host or port from its session menu), and for a frame whose
+    mesh the viewer no longer has because its listener restarted; send the
+    mesh again then. The viewer validates everything it decodes and reports
+    problems in its window.
+
+    Each send copies the values before returning, so arrays may change right
+    after. With ``queue=True`` (or :meth:`start_queue`) sends return without
+    waiting for the viewer or the network: a background thread sends packets
+    in order. A packet it cannot send is counted in :attr:`queue_stats` and
+    reported by the next send raising, as without a queue.
     """
 
-    def __init__(self, host: str = "localhost", port: int = 5555, *, binary: bool = True) -> None:
+    def __init__(self, host: str = "localhost", port: int = 5555, *, binary: bool = True,
+                 queue: bool = False, queue_mib: float = 512, when_full: str = "wait") -> None:
         self._core: _rayfem.StreamClient | None = _rayfem.StreamClient(host, port)
         self._core.binary_fields = binary
+        if queue:
+            self.start_queue(queue_mib, when_full)
 
     def _client(self) -> _rayfem.StreamClient:
         if self._core is None:
@@ -215,6 +234,37 @@ class Client:
     def address(self) -> str:
         """The ``host:port`` this client streams to."""
         return self._client().address
+
+    def start_queue(self, max_mib: float = 512, when_full: str = "wait") -> None:
+        """Send in the background, or change the queue's options.
+
+        ``max_mib`` bounds the encoded packets not yet written to the network.
+        When a frame does not fit, ``"wait"`` blocks the send until it does,
+        ``"drop_oldest"`` discards the oldest queued frames, and
+        ``"drop_newest"`` refuses the frame. Meshes and schemas always wait.
+        """
+        try:
+            self._client().start_queue(int(max_mib * 1048576), when_full)
+        except ValueError as error:
+            raise RayFEMError(str(error)) from error
+
+    def stop_queue(self, timeout: float = 5.0) -> None:
+        """Send what is queued (for up to ``timeout`` seconds, dropping the rest), then send directly again."""
+        self._client().stop_queue(int(timeout * 1000))
+
+    @property
+    def queued(self) -> bool:
+        """Whether sends go through the background queue."""
+        return self._client().queued
+
+    def flush(self, timeout: float | None = None) -> bool:
+        """Wait until every packet is written to the network; False if ``timeout`` seconds pass first."""
+        return self._client().flush(-1 if timeout is None else int(timeout * 1000))
+
+    @property
+    def queue_stats(self) -> QueueStats:
+        """The send queue's counters."""
+        return QueueStats(*self._client().queue_stats())
 
     def register_schema(self, schema: Schema) -> None:
         """Declare the values, tags and model axes frames will carry; registering again replaces it."""
@@ -250,7 +300,9 @@ class Client:
             raise RayFEMError(str(error)) from error
 
     def close(self) -> None:
-        """Release the connection; queued packets are flushed for up to a second."""
+        """Release the connection; queued packets are sent for up to five seconds, then for a second more."""
+        if self._core is not None and self._core.queued:
+            self._core.stop_queue(5000)
         self._core = None
 
     def __enter__(self) -> Client:

@@ -73,6 +73,22 @@ A frame is one complete state: send all of its named grid functions together. Us
 
 Streaming is one-way, but the client watches its connection and refuses sends the viewer could not use instead of queueing them. A send fails when no viewer is listening at the client's address, after waiting up to a second for one: the viewer closed, or moved to another host or port. A frame fails when the viewer's listener has restarted since its mesh was sent, for example after the viewer changed its host or control port and came back on the same stream port, because that listener no longer has the mesh; call `sendMesh` again. `connected()` reports whether a viewer is connected now. A packet sent at the moment the viewer moves can still be lost; the next send reports it.
 
+### Send without waiting: the queue
+
+Each send encodes its frame once, copying the coefficients into a single packet, so the grid functions may change as soon as the call returns; the packet then goes to the network without another copy. Encoding runs at about the speed of a memory copy (a 24 MiB frame takes about 2 ms; `tests/network/stream_benchmark` measures your case). Without a queue, the send also waits for a viewer as described above, up to a second each time none is listening, and while the viewer is busy (below).
+
+`startQueue` makes sends return as soon as the packet is encoded and queued; a background thread sends packets in order, so a solver never waits for the viewer, a viewer that has moved or closed, or a slow network:
+
+```cpp
+viewer.startQueue();  // or startQueue({max_bytes, RayFEM::StreamQueue::WhenFull::DropOldest})
+// ... sendMesh and sendFrame as above; each returns once its packet is queued ...
+viewer.flush();       // optional: wait until everything is written to the network
+```
+
+The queue holds at most `max_bytes` (512 MiB by default) of packets not yet written to the network; one larger packet is queued alone. When a frame does not fit, `Wait` (the default) blocks the send until it does, `DropOldest` discards the oldest queued frames, and `DropNewest` refuses the new frame. Meshes and schemas are never dropped. A packet the background thread cannot send (no viewer, or a frame whose mesh the viewer no longer has) is counted in `queueStats()`, and the next send is refused with its reason, as it would have been without a queue; send the mesh again if the viewer restarted. After waiting a second in vain for a viewer, the thread gives up on later packets at once until a viewer connects. The destructor sends what is queued for up to five seconds; `stream().stopQueue()` does the same and returns to sending in the caller's thread.
+
+The viewer never drops frames it cannot keep up with. While its receive queue is full (64 frames or 128 MiB waiting to be decoded) it stops reading the stream, and senders wait: without a queue, a send waits for a viewer that is connected but busy, for up to 30 seconds before it is refused; with a queue, packets wait in the queue and its `when_full` choice applies. A few packets also wait in the network on the way.
+
 ### Describe frames: coordinates, values and tags
 
 Besides an index and a time, frames can carry values and tags a client declares up front. Register a `FrameSchema` once, before frames that use it:

@@ -12,3 +12,7 @@ test('launcher', launcher_test, timeout: 30)
 shutdown_test = executable('shutdown_test', 'shutdown_test.cpp',
     dependencies: [rayfem_dep, app_dependencies], link_args: link_args)
 test('shutdown', shutdown_test, timeout: 30)
+
+# Not a test: how long a solver waits on each send. Run it by hand.
+executable('stream_benchmark', 'stream_benchmark.cpp',
+    dependencies: [rayfem_dep, app_dependencies], link_args: link_args)

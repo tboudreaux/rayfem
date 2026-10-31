@@ -19,6 +19,9 @@ public:
 
     // Call on the rendering thread. Network reception never calls MFEM.
     // The budget bounds decode work per UI tick; complete frames remain atomic.
+    // While 64 frames (or 128 MiB) wait to be fetched, the server stops
+    // reading the stream, so senders wait instead of frames being dropped.
+    // fetchLatestFrame drops all but the newest, counted as dropped.
     std::vector<std::shared_ptr<RenderFrame>> fetchFrames(size_t max_frames = 4);
     std::shared_ptr<RenderFrame> fetchLatestFrame();
     size_t getReceivedFrameCount() const;

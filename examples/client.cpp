@@ -35,6 +35,7 @@ struct Options {
     bool no_displacement = false;
     bool quiet = false;
     bool text_fields = false;
+    bool queue = false;
     std::uint64_t mesh_id = 1;
     int iterations = 0;         // frames per time step, each an iterate of a solve
     bool static_model = false;  // time means nothing; frames are iterations of one solve
@@ -178,6 +179,7 @@ int stream(const Options& options) {
     };
     RayFEM::Client client(options.host, static_cast<std::size_t>(options.port));
     client.setBinaryFields(!options.text_fields);
+    if (options.queue) client.startQueue();
     // Declare what frames will carry: progress coordinates, values to show,
     // and tags telling iterates from converged frames.
     RayFEM::FrameSchema schema;
@@ -254,6 +256,7 @@ int stream(const Options& options) {
                                                    (frame + 1) * options.interval));
         }
     }
+    if (options.queue && !client.flush(30000)) std::cerr << "Queued frames were still unsent after 30 s\n";
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - start).count();
     std::cout << "Sent " << sent << " complete frames in " << elapsed << " s ("
@@ -294,6 +297,7 @@ int main(int argc, char** argv) {
     app.add_flag("--no-displacement", options.no_displacement, "Send undeformed frames");
     app.add_flag("--quiet", options.quiet, "Only print the stream summary");
     app.add_flag("--text-fields", options.text_fields, "Send fields as MFEM text (for viewers without binary fields)");
+    app.add_flag("--queue", options.queue, "Send in the background, without waiting for the viewer");
     app.add_option("--mesh-id", options.mesh_id, "Identifier used for mesh reuse");
     app.add_option("--iterations", options.iterations, "Describe frames as iterates: this many per time step, the last tagged converged")
         ->check(CLI::Range(0, 1000));

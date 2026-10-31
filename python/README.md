@@ -37,6 +37,29 @@ the terminal) closes the viewer normally; a second Ctrl-C, or a viewer that
 has not closed after ten seconds, ends it. `rayfem --help` lists the window
 options; `--verbose` shows the viewer's graphics log.
 
+## Sending without waiting
+
+Each send copies the coefficients before it returns, so arrays may change
+right after. With a queue, sends also return without waiting for the viewer
+or the network; a background thread sends the packets in order:
+
+```python
+client = rayfem.Client(queue=True)                # 512 MiB of packets at most
+client = rayfem.Client(queue=True, queue_mib=2048, when_full="drop_oldest")
+...
+client.flush()          # wait until everything is written to the network
+client.queue_stats      # QueueStats(pending, pending_bytes, sent, dropped, failed)
+```
+
+When a frame does not fit, `"wait"` (the default) blocks the send until it
+does, `"drop_oldest"` discards the oldest queued frames and `"drop_newest"`
+refuses the new one; meshes and schemas always wait. The queue fills when
+frames come faster than the viewer decodes them: the viewer then stops
+reading rather than dropping frames (without a queue, sends wait instead). A packet that could
+not be sent (no viewer, or the viewer restarted and lost the mesh) makes the
+next send raise with the reason. Closing the client sends what is queued for
+up to five seconds.
+
 ## Data model
 
 The Python API shares no C++ types with other packages, so it works beside

@@ -239,19 +239,40 @@ int main(int argc, char** argv) {
                 for (int k = 0; k < frame->fields[j].gf->Size(); ++k)
                     require((*frame->fields[j].gf)[k] == (*first[0]->fields[j].gf)[k], "Text and binary fields decoded differently");
         require(text[1]->fields[0].gf->FESpace() == text[0]->fields[0].gf->FESpace(), "Text frames did not share a decoded space");
-        metadata.frame_index = 2;
-        for (uint32_t index = 3; index < 123; ++index) {
-            metadata.frame_index = index;
-            scalar = double(index);
-            require(client.sendFrame(7, fields, metadata, &displacement), client.getLastError());
-        }
-        waitFor([&] { return server.getDroppedFrameCount() >= 56; }, "Burst did not exercise bounded queue");
-        require(server.getPendingFrameCount() <= 64, "Receiver queue exceeded bound");
-        auto burst = receive(server, 64);
-        require(burst.front()->metadata.frame_index == 59 && burst.back()->metadata.frame_index == 122, "Newest complete frames were not retained in order");
-        for (size_t i = 0; i < burst.size(); ++i) {
-            require(burst[i]->metadata.frame_index == 59 + i, "Burst frame ordering changed");
-            require((*burst[i]->fields[0].gf)[0] == double(59 + i), "Fields crossed frame boundaries");
+        {
+            // A burst larger than the receiver's queue: the receiver stops
+            // reading while its queue is full, the sender waits, and every
+            // frame arrives in order.
+            constexpr uint32_t burst_frames = 300;
+            bool burst_sent = true;
+            std::string burst_error;
+            std::thread sender([&] {
+                RayFEM::FrameMetadata step;
+                for (uint32_t index = 3; index < 3 + burst_frames && burst_sent; ++index) {
+                    step.frame_index = index;
+                    scalar = double(index);
+                    burst_sent = client.sendFrame(7, fields, step, &displacement);
+                }
+                if (!burst_sent) burst_error = client.getLastError();
+            });
+            waitFor([&] { return server.getPendingFrameCount() >= 64; }, "The burst did not fill the receiver's queue");
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            require(server.getPendingFrameCount() == 64 && server.getDroppedFrameCount() == 0,
+                    "A full receiver must stop reading, not drop: " + std::to_string(server.getPendingFrameCount()) + " pending");
+            std::vector<std::shared_ptr<RayFEM::RenderFrame>> burst;
+            waitFor([&] {
+                require(server.getPendingFrameCount() <= 64, "Receiver queue exceeded bound");
+                for (auto& frame : server.fetchFrames(8)) burst.push_back(std::move(frame));
+                return burst.size() >= burst_frames;
+            }, "The burst did not arrive: " + server.getLastError());
+            sender.join();
+            require(burst_sent, "A burst send failed: " + burst_error);
+            require(server.getDroppedFrameCount() == 0, "The receiver dropped frames instead of waiting");
+            for (size_t i = 0; i < burst.size(); ++i) {
+                require(burst[i]->metadata.frame_index == 3 + i, "Burst frame ordering changed");
+                require((*burst[i]->fields[0].gf)[0] == double(3 + i), "Fields crossed frame boundaries");
+            }
+            metadata.frame_index = 3 + burst_frames;
         }
         RayFEM::SocketPtr raw(zsock_new(ZMQ_PUSH));
         zsock_set_linger(raw, 0);
@@ -330,10 +351,10 @@ int main(int argc, char** argv) {
         rejectMesh(56, "MFEM mesh v1.0\ndimension\n4\nelements\n1\n1 3 0 1 2 3\nboundary\n0\nvertices\n4\n4\n");
         rejectMesh(57, "MFEM mesh v1.0\ndimension\n2\nelements\n1\n1 2 0 1 999\nboundary\n0\nvertices\n3\n2\n0 0 1 0 0 1\n");
         rejectMesh(58, "MFEM NURBS mesh v1.0\ndimension\n2\nelements\n-3\n");
-        metadata.frame_index = 123;
+        metadata.frame_index = 1000;
         require(client.sendFrame(7, fields, metadata), client.getLastError());
         auto recovered = receive(server, 1);
-        require(recovered.front()->metadata.frame_index == 123, "Receiver did not recover after malformed input");
+        require(recovered.front()->metadata.frame_index == 1000, "Receiver did not recover after malformed input");
         require(!recovered.front()->displacement, "Previous frame displacement leaked into next frame");
         // Re-registering geometry explicitly starts a fresh frame sequence.
         require(client.sendMesh(7, mesh), client.getLastError());
@@ -536,7 +557,77 @@ int main(int argc, char** argv) {
             waitFor([&] { return server.getErrorCount() > errors; }, "A descriptor without a schema was accepted");
             require(server.getLastError().find("schema") != std::string::npos, "The schema error is reported");
         }
-        std::cout << "Streaming checks passed: curvilinear geometry, five FE spaces, shared meshes, atomic fields, displacement, burst queue, malformed input, restart, NURBS, and 148225-DOF multi-field frames.\n";
+        {
+            // A queued client returns once a frame is encoded; its values may
+            // change right after, and the frames arrive in order.
+            server.fetchFrames(64);
+            RayFEM::Client queued("127.0.0.1", port);
+            queued.startQueue();
+            require(queued.sendMesh(40, mesh), queued.getLastError());
+            RayFEM::FrameMetadata step;
+            for (uint32_t index = 0; index < 3; ++index) {
+                step.frame_index = index;
+                scalar = double(index);
+                require(queued.sendFrame(40, fields, step, &displacement), queued.getLastError());
+            }
+            scalar = -1;
+            require(queued.flush(5000), "The queue did not drain");
+            const auto stats = queued.queueStats();
+            require(stats.sent == 4 && stats.failed == 0 && stats.dropped == 0 && stats.pending == 0 && stats.pending_bytes == 0,
+                    "Queue counts: " + std::to_string(stats.sent) + " sent");
+            auto arrived = receive(server, 3);
+            for (uint32_t index = 0; index < 3; ++index)
+                require(arrived[index]->metadata.frame_index == index && (*arrived[index]->fields[0].gf)[0] == double(index),
+                        "Queued frames arrive in order with the values they were sent with");
+            // Back to sending in the caller's thread.
+            queued.stream().stopQueue();
+            require(!queued.stream().queued(), "The queue stopped");
+            step.frame_index = 3;
+            require(queued.sendFrame(40, fields, step), queued.getLastError());
+            require(receive(server, 1).front()->metadata.frame_index == 3, "Sending without a queue resumes");
+        }
+        {
+            // With no viewer, a queued send does not wait for one. The background
+            // thread waits a second for the mesh; meanwhile a full queue drops.
+            const size_t nobody = port + 2;
+            RayFEM::StreamClient offline("127.0.0.1", nobody);
+            const std::string mesh_text = "MFEM mesh v1.0\n";
+            const std::string space = "FiniteElementSpace\nFiniteElementCollection: H1_2D_P1\nVDim: 1\nOrdering: 0\n";
+            const std::vector<double> values(1000, 1.0);
+            const RayFEM::FieldData field{"u", space, values};
+            offline.startQueue();
+            const auto begin = std::chrono::steady_clock::now();
+            require(offline.sendMesh(1, mesh_text), offline.getLastError());
+            RayFEM::FrameMetadata frame;
+            require(offline.sendFrame(1, {&field, 1}, frame), offline.getLastError());
+            require(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds(300), "A queued send waited for a viewer");
+            const size_t one = offline.queueStats().pending_bytes;
+            // Room for one frame more than is queued: the next drops the oldest.
+            offline.startQueue({one + 100, RayFEM::StreamClient::Queue::WhenFull::DropOldest});
+            frame.frame_index = 1;
+            require(offline.sendFrame(1, {&field, 1}, frame), offline.getLastError());
+            auto stats = offline.queueStats();
+            require(stats.dropped == 1 && stats.pending_bytes == one, "DropOldest discards the oldest queued frame");
+            offline.startQueue({one, RayFEM::StreamClient::Queue::WhenFull::DropNewest});
+            frame.frame_index = 2;
+            require(!offline.sendFrame(1, {&field, 1}, frame) && offline.getLastError().find("queue is full") != std::string::npos,
+                    "DropNewest refuses a frame that does not fit");
+            require(offline.queueStats().dropped == 2, "A refused frame counts as dropped");
+            require(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds(800), "The drops did not wait");
+            // The failures are reported by the next send, once.
+            require(offline.flush(5000), "Packets with no viewer were not given up");
+            stats = offline.queueStats();
+            require(stats.failed == 2 && stats.sent == 0, "Packets with no viewer fail: " + std::to_string(stats.failed));
+            frame.frame_index = 3;
+            require(!offline.sendFrame(1, {&field, 1}, frame) && offline.getLastError().find("was not sent: No viewer") != std::string::npos,
+                    "A background failure is reported: " + offline.getLastError());
+            require(offline.sendFrame(1, {&field, 1}, frame), "A background failure is reported once: " + offline.getLastError());
+            // Having waited in vain, the thread gives up on later packets at once.
+            const auto quick = std::chrono::steady_clock::now();
+            require(offline.flush(5000) && std::chrono::steady_clock::now() - quick < std::chrono::milliseconds(300),
+                    "A closed viewer costs queued packets no time");
+        }
+        std::cout << "Streaming checks passed: curvilinear geometry, five FE spaces, shared meshes, atomic fields, displacement, lossless burst, malformed input, restart, NURBS, 148225-DOF multi-field frames, and the send queue.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Streaming test failed: " << error.what() << '\n';

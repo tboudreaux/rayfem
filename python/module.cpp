@@ -117,6 +117,25 @@ NB_MODULE(_rayfem, m) {
         .def_prop_ro("last_error", &RayFEM::StreamClient::getLastError)
         .def_prop_ro("connected", &RayFEM::StreamClient::connected)
         .def_prop_ro("address", &RayFEM::StreamClient::address)
+        .def("start_queue", [](RayFEM::StreamClient& client, size_t max_bytes, const std::string& when_full) {
+                RayFEM::StreamQueue options;
+                options.max_bytes = max_bytes;
+                if (when_full == "wait") options.when_full = RayFEM::StreamQueue::WhenFull::Wait;
+                else if (when_full == "drop_oldest") options.when_full = RayFEM::StreamQueue::WhenFull::DropOldest;
+                else if (when_full == "drop_newest") options.when_full = RayFEM::StreamQueue::WhenFull::DropNewest;
+                else throw nb::value_error("when_full must be 'wait', 'drop_oldest' or 'drop_newest'");
+                client.startQueue(options);
+            }, "max_bytes"_a = size_t{512} << 20, "when_full"_a = "wait",
+            "Send in the background; when_full is 'wait', 'drop_oldest' or 'drop_newest'.")
+        .def("stop_queue", &RayFEM::StreamClient::stopQueue, "timeout_ms"_a = 5000, nb::call_guard<nb::gil_scoped_release>(),
+             "Send what is queued (up to timeout_ms), then send in the caller's thread again.")
+        .def_prop_ro("queued", &RayFEM::StreamClient::queued)
+        .def("flush", &RayFEM::StreamClient::flush, "timeout_ms"_a = -1, nb::call_guard<nb::gil_scoped_release>(),
+             "Wait until every packet is written to the network; False on timeout.")
+        .def("queue_stats", [](const RayFEM::StreamClient& client) {
+                const auto s = client.queueStats();
+                return std::make_tuple(s.pending, s.pending_bytes, s.sent, s.dropped, s.failed);
+            }, "(pending, pending_bytes, sent, dropped, failed)")
         .def("register_schema", [](RayFEM::StreamClient& client,
                                    const std::vector<std::tuple<std::string, std::string, bool, std::string, std::string>>& values,
                                    const std::vector<std::pair<std::string, std::string>>& tags, bool has_time,

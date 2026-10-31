@@ -141,13 +141,36 @@ def test_signals() -> None:
     print("Ctrl-C still reaches Python")
 
 
+def test_queue() -> None:
+    # A queued client does not wait for a viewer; what it could not send is
+    # counted and reported by the next send, once.
+    _, text = square()
+    field = rayfem.Field("u", mesh.vertex_space(2), array.array("d", [0, 1, 2, 3]))
+    client = rayfem.Client(port=free_port(), queue=True)
+    assert client.queued
+    assert "when_full" in expect_error(client.start_queue, 64, "sometimes")
+    start = time.monotonic()
+    client.send_mesh(1, text)
+    client.send_frame(1, [field], index=0)
+    assert time.monotonic() - start < 0.3, "a queued send waited for a viewer"
+    assert client.flush(5.0)
+    stats = client.queue_stats
+    assert stats.failed == 2 and stats.sent == 0 and stats.pending == 0 and stats.pending_bytes == 0, stats
+    assert "was not sent: No viewer" in expect_error(client.send_frame, 1, [field], index=1)
+    client.send_frame(1, [field], index=1)
+    client.stop_queue()
+    assert not client.queued
+    client.close()
+    print("send queue ok")
+
+
 def test_probe(probe: str) -> None:
-    """Frames sent from Python arrive at the C++ server decoded exactly."""
+    """Frames sent from Python arrive at the C++ server decoded exactly, through the send queue."""
     port = free_port()
     process = subprocess.Popen([probe, str(port), "3", "30"], stdout=subprocess.PIPE, text=True)
     assert process.stdout.readline().strip() == "READY"
     vertices, text = square()
-    with rayfem.Client(port=port) as client:
+    with rayfem.Client(port=port, queue=True) as client:
         client.register_schema(rayfem.Schema(
             values=[rayfem.Value("iteration", "int", coordinate=True), rayfem.Value("virial ratio", "float"),
                     rayfem.Value("solver", "str")],
@@ -210,6 +233,7 @@ if __name__ == "__main__":
     test_mesh_text()
     test_client_refusals()
     test_signals()
+    test_queue()
     if os.environ.get("RAYFEM_STREAM_PROBE"):
         test_probe(os.environ["RAYFEM_STREAM_PROBE"])
     if os.environ.get("RAYFEM_TEST_VIEWER") == "1":
