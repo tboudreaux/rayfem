@@ -181,7 +181,10 @@ public:
         surfaceTrace.SetWorker(&pipeline);
         rlImGuiSetup(true);
         ImGui::GetIO().IniFilename = nullptr;
-        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        // No keyboard navigation: with it, Space and Enter press the last
+        // clicked button (Fit, Home, ...) whenever no text field is active.
+        // Tab still moves between text fields; ImGui always allows that.
+        ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         ImFontConfig font;
         font.SizePixels=16;
         ImFont* uiFont=nullptr;
@@ -1877,9 +1880,14 @@ private:
         // ImGui can defer a position event when a press arrives in that frame.
         Vector2 mouse=GetMousePosition();
         viewportOrigin=origin;viewportSize=size;
+        // The pointer belongs to the view only when no floating window (Movie,
+        // Annotations, ray placement) or popup lies over it.
         bool hovered=RayFEM::CameraViewportContains(mouse,{origin.x,origin.y,size.x,size.y}) &&
             IsWindowFocused() && !rayPlacement.Covers(mouse) &&
+            ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) &&
             !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel);
+        // Viewer shortcuts never fire while typing in a text field.
+        const bool shortcuts=hovered && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive();
         RayFEM::CameraInputSnapshot input{
             mouse,hovered,
             IsMouseButtonPressed(MOUSE_BUTTON_LEFT),IsMouseButtonDown(MOUSE_BUTTON_LEFT),
@@ -1938,7 +1946,7 @@ private:
         if(elementPress)RayFEM::PrepareCameraOrbitGesture(input,cameraDrag,elementPressPosition,elementPressMoved);
         if(RayFEM::UpdateCameraController(camera,cameraDrag,input,radius))cameraAdjusted=true;
         UpdateThrow(mouse);
-        if (hovered && !ImGui::IsAnyItemActive()) {
+        if (shortcuts) {
             if (IsKeyPressed(KEY_LEFT)) {selected=StepShown(-1,false);follow=false;playing=false;}
             if (IsKeyPressed(KEY_RIGHT)) {selected=StepShown(1,false);follow=false;playing=false;}
         }
@@ -1968,15 +1976,15 @@ private:
             flow.UpdateContext(active->frame,Field(active->frame),fieldName,RenderSettings(active->frame));
             if(active->vertices) flow.SetBounds(active->bounds,active->frame->mesh);
         }
-        if (hovered && IsKeyPressed(KEY_R) && active && active->vertices) {cameraAdjusted=false;FitCamera(active->bounds);}
-        if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_HOME))HomeCamera();
+        if (shortcuts && IsKeyPressed(KEY_R) && active && active->vertices) {cameraAdjusted=false;FitCamera(active->bounds);}
+        if(shortcuts && IsKeyPressed(KEY_HOME))HomeCamera();
         if(annotations.Placing()!=RayFEM::UI::Annotations::Tool::None && !ImGui::IsAnyItemActive() &&
            ImGui::IsKeyPressed(ImGuiKey_Escape,false))annotations.Cancel();
         if(pickingDof && !ImGui::IsAnyItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape,false) &&
            !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))pickingDof=false;
         if(RayFEM::UpdateCameraViewTransition(camera,cameraTransition,GetTime()))cameraAdjusted=true;
-        if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_S))spin.active=!spin.active;
-        if(hovered && !ImGui::IsAnyItemActive() && IsKeyPressed(KEY_P))TogglePin();
+        if(shortcuts && IsKeyPressed(KEY_S))spin.active=!spin.active;
+        if(shortcuts && IsKeyPressed(KEY_P))TogglePin();
         // A camera transition (Fit, Home, the cube) ends a spin.
         if(cameraTransition.active)spin.active=false;
         if(spin.active) {
