@@ -30,6 +30,7 @@ struct Scene {
     std::string field;
     Color theme{}, themeText{};
     unsigned frame = 0;
+    AxesSettings axes;  // the view's axes; style None while it shows none
 };
 
 struct Options {
@@ -69,10 +70,119 @@ struct Layout {
     Rectangle scene{};
 };
 
+inline void Tip(const char* text) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::BeginTooltip(); ImGui::PushTextWrapPos(ImGui::GetFontSize()*24); ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos(); ImGui::EndTooltip();
+    }
+}
+
+// The axes' style and placement, as the figure and the view offer them;
+// true when something changed. allowNone offers "None" as a style.
+inline bool AxesControls(AxesSettings& axes, BoundingBox bounds, bool allowNone) {
+    bool changed = false;
+    const char* names[] = {"None", "Cartesian", "Cylindrical", "Spherical", "Polar"};
+    const int skip = allowNone ? 0 : 1;
+    int style = std::max(0, int(axes.style) - skip);
+    if (ImGui::Combo("##axes_style", &style, names + skip, 5 - skip)) { axes.style = AxesStyle(style + skip); changed = true; }
+    if (axes.style != AxesStyle::None && axes.style != AxesStyle::Cartesian) {
+        FieldLabel("Origin");
+        ImGui::NewLine();
+        const float extent = std::max(1e-6f, Vector3Distance(bounds.min, bounds.max));
+        changed |= ImGui::DragFloat3("##axes_origin", &axes.origin.x, extent*.002f, 0, 0, "%.4g");
+        if (ImGui::Button("Mesh center", {-1, 0})) {
+            axes.origin = Vector3Scale(Vector3Add(bounds.min, bounds.max), .5f); changed = true;
+        }
+        FieldLabel("Axis");
+        const float third = (ImGui::GetContentRegionAvail().x - 2*ImGui::GetStyle().ItemSpacing.x)/3;
+        const char* letters[] = {"X", "Y", "Z"};
+        for (int a = 0; a < 3; ++a) {
+            if (a) ImGui::SameLine();
+            Vector3 unit{}; (&unit.x)[a] = 1;
+            if (ToggleButton(letters[a], Vector3Distance(Vector3Normalize(axes.axis), unit) < 1e-4f, {third, 0})) {
+                axes.axis = unit; changed = true;
+            }
+        }
+        Tip("The polar or symmetry axis: z for cylinders, the pole for spheres, the normal of the polar plane.");
+        // Ring radius: fitted to the mesh plus padding, or set.
+        int custom = axes.radius > 0 ? 1 : 0;
+        FieldLabel("Radius");
+        if (Segmented("##ring_radius_mode", &custom, {"Fit mesh", "Custom"})) {
+            axes.radius = custom ? std::max(1e-6f, extent*.5f) : 0; changed = true;
+        }
+        if (custom) {
+            FieldLabel("Ring radius");
+            changed |= ImGui::DragFloat("##ring_radius", &axes.radius, extent*.002f, 1e-6f, extent*100, "%.4g", ImGuiSliderFlags_AlwaysClamp);
+            Tip("Radius of the rings and the length of the radial ruler, in mesh units.");
+        } else {
+            float percent = axes.padding*100;
+            FieldLabel("Padding");
+            if (ImGui::SliderFloat("##ring_padding", &percent, -50, 100, "%.0f%%")) { axes.padding = percent/100; changed = true; }
+            Tip("Rings sit this far outside the mesh radius. Negative values draw them inside.");
+        }
+        FieldLabel("Angle step");
+        int step = axes.angleStep;
+        const int steps[] = {10, 15, 30, 45, 60, 90};
+        if (ImGui::BeginCombo("##angle_step", (std::to_string(step) + "°").c_str())) {
+            for (int value : steps) if (ImGui::Selectable((std::to_string(value) + "°").c_str(), value == step)) { axes.angleStep = value; changed = true; }
+            ImGui::EndCombo();
+        }
+    }
+    if (axes.style != AxesStyle::None) {
+        int hidden = axes.showHidden ? 0 : 1;
+        FieldLabel("Behind mesh");
+        if (Segmented("##hidden_axes", &hidden, {"Dashed", "Hidden"})) { axes.showHidden = hidden == 0; changed = true; }
+    }
+    return changed;
+}
+
+// Each drawn piece of a stroke, dashes measured along the whole polyline as
+// in PDF and TikZ.
+template <typename Segment>
+void ForEachDash(const Stroke& stroke, Segment segment) {
+    if (!stroke.dashed) {
+        for (std::size_t i = 1; i < stroke.points.size(); ++i) segment(stroke.points[i - 1], stroke.points[i]);
+        return;
+    }
+    const float on = stroke.width*4 + 2, off = stroke.width*3 + 2;
+    float phase = 0;
+    for (std::size_t i = 1; i < stroke.points.size(); ++i) {
+        const Vector2 a = stroke.points[i - 1], b = stroke.points[i];
+        const float length = Vector2Distance(a, b);
+        float t = 0;
+        while (t < length) {
+            const float cycle = std::fmod(phase + t, on + off);
+            const bool drawing = cycle < on;
+            const float step = std::min(length - t, drawing ? on - cycle : on + off - cycle);
+            if (drawing) segment(Vector2Lerp(a, b, t/length), Vector2Lerp(a, b, (t + step)/length));
+            t += std::max(step, 1e-3f);
+        }
+        phase += length;
+    }
+}
+
+// An overlay into the bound target, scaled by s; text in font when text is set.
+inline void DrawOverlay(const Overlay& overlay, float s, const Font* font) {
+    for (const auto& f : overlay.fills) DrawRectangleRec({f.box.x*s, f.box.y*s, f.box.width*s, f.box.height*s}, f.color);
+    for (const auto& stroke : overlay.strokes) {
+        const float width = std::max(1.f, stroke.width*s);
+        ForEachDash(stroke, [&](Vector2 a, Vector2 b) {
+            DrawLineEx(Vector2Scale(a, s), Vector2Scale(b, s), width, stroke.color);
+            if (stroke.color.a == 255 && width > 2) DrawCircleV(Vector2Scale(b, s), width*.5f, stroke.color);
+        });
+    }
+    if (!font) return;
+    for (const auto& l : overlay.labels) {
+        const Vector2 size = MeasureTextEx(*font, l.plain.c_str(), l.size*s, 0);
+        DrawTextEx(*font, l.plain.c_str(), {std::round(l.at.x*s - l.align.x*size.x), std::round(l.at.y*s - l.align.y*size.y)}, l.size*s, 0, l.color);
+    }
+}
+
 class Exporter {
 public:
     void Open(const Scene& scene) {
-        requestOpen = true;
+        open = true;
+        focus = true;
         if (!initialized) {
             initialized = true;
             tools = LatexTools::Discover();
@@ -82,6 +192,7 @@ public:
             for (const auto& [name, path] : tools.engines) { if (name == "pdflatex") options.engine = index; ++index; }
             SetSizeFromViewport(scene, 2);
             options.axes.origin = Vector3Scale(Vector3Add(scene.bounds.min, scene.bounds.max), .5f);
+            if (scene.axes.style != AxesStyle::None) options.axes = scene.axes;
         }
         if (options.lockAspect) SetSizeFromViewport(scene, float(options.width)/std::max(1.f, scene.viewport.x));
         if (!options.path[0] || std::string(options.path).starts_with("rayfem-exports/figure-frame-"))
@@ -95,31 +206,30 @@ public:
         if (job.valid()) job.wait();
     }
 
-    // Call every frame; shows the dialog while it is open.
+    // Call every frame. The window floats over the viewer, which stays usable
+    // so the view can be adjusted while the preview follows it. While pinned,
+    // the viewer calls DrawPinned in its side column instead.
     void Draw(const Scene& scene) {
         PollJob();
-        if (requestOpen) { ImGui::OpenPopup("Export figure"); requestOpen = false; open = true; }
+        if (!open || pinned) return;
         const ImVec2 display = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowSize({std::min(1040.f, display.x - 80), std::min(680.f, display.y - 80)}, ImGuiCond_Appearing);
         ImGui::SetNextWindowPos({display.x*.5f, display.y*.5f}, ImGuiCond_Appearing, {.5f, .5f});
-        if (!ImGui::BeginPopupModal("Export figure", &open, ImGuiWindowFlags_NoSavedSettings)) return;
-        if (!scene.hasMesh) {
-            ImGui::TextDisabled("Nothing to export yet: no surface is shown.");
-            if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
-            return;
+        if (focus) { ImGui::SetNextWindowFocus(); focus = false; }
+        if (ImGui::Begin(ICON_FA_IMAGE "  Export figure###figure", &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse)) {
+            TitleBarPin(pinned);
+            Contents(scene, false);
         }
-        const float controls = 360;
-        ImGui::BeginChild("figure options", {controls, -ImGui::GetFrameHeightWithSpacing()*2.2f}, ImGuiChildFlags_None);
-        const bool changed = Controls(scene);
-        ImGui::EndChild();
-        ImGui::SameLine();
-        ImGui::BeginChild("figure preview", {0, -ImGui::GetFrameHeightWithSpacing()*2.2f}, ImGuiChildFlags_Borders);
-        DrawPreview(scene, changed);
-        ImGui::EndChild();
-        Footer(scene);
-        ImGui::EndPopup();
+        ImGui::End();
     }
+    void DrawPinned(const Scene& scene) {
+        if (!open || !pinned) return;
+        PinnedHeader(ICON_FA_IMAGE "  Export figure", pinned, open);
+        Contents(scene, true);
+    }
+    bool IsOpen() const { return open; }
+    bool Pinned() const { return open && pinned; }
+    void Pin(bool on) { pinned = on; }
 
     // Scripted use: adjust the options, export, then poll for the result.
     Options& Settings() { return options; }
@@ -199,10 +309,11 @@ private:
     Options options;
     LatexTools tools;
     TextMetrics metrics;
-    bool initialized = false, requestOpen = false, open = false, previewDirty = true;
+    bool initialized = false, open = false, focus = false, pinned = false, previewDirty = true;
     Texture2D preview{};
     Vector2 previewCanvas{};
     double previewAt = -1;
+    Camera3D previewCamera{};
     std::future<std::string> job;
     std::string status;
     bool statusError = false;
@@ -227,13 +338,6 @@ private:
         auto it = tools.engines.begin();
         std::advance(it, std::clamp(options.engine, 0, int(tools.engines.size()) - 1));
         return it->first;
-    }
-
-    static void Tip(const char* text) {
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::BeginTooltip(); ImGui::PushTextWrapPos(ImGui::GetFontSize()*24); ImGui::TextUnformatted(text);
-            ImGui::PopTextWrapPos(); ImGui::EndTooltip();
-        }
     }
 
     bool Controls(const Scene& scene) {
@@ -311,57 +415,7 @@ private:
             EndSection();
         }
         if (BeginSection("Axes", options.axes.style == AxesStyle::None ? nullptr : "On")) {
-            int style = int(options.axes.style);
-            const char* names[] = {"None", "Cartesian", "Cylindrical", "Spherical", "Polar"};
-            if (ImGui::Combo("##axes_style", &style, names, 5)) { options.axes.style = AxesStyle(style); changed = true; }
-            if (options.axes.style != AxesStyle::None && options.axes.style != AxesStyle::Cartesian) {
-                FieldLabel("Origin");
-                ImGui::NewLine();
-                const float extent = std::max(1e-6f, Vector3Distance(scene.bounds.min, scene.bounds.max));
-                changed |= ImGui::DragFloat3("##axes_origin", &options.axes.origin.x, extent*.002f, 0, 0, "%.4g");
-                if (ImGui::Button("Mesh center", {-1, 0})) {
-                    options.axes.origin = Vector3Scale(Vector3Add(scene.bounds.min, scene.bounds.max), .5f); changed = true;
-                }
-                FieldLabel("Axis");
-                const float third = (ImGui::GetContentRegionAvail().x - 2*ImGui::GetStyle().ItemSpacing.x)/3;
-                const char* axes[] = {"X", "Y", "Z"};
-                for (int a = 0; a < 3; ++a) {
-                    if (a) ImGui::SameLine();
-                    Vector3 unit{}; (&unit.x)[a] = 1;
-                    if (ToggleButton(axes[a], Vector3Distance(Vector3Normalize(options.axes.axis), unit) < 1e-4f, {third, 0})) {
-                        options.axes.axis = unit; changed = true;
-                    }
-                }
-                Tip("The polar or symmetry axis: z for cylinders, the pole for spheres, the normal of the polar plane.");
-                // Ring radius: fitted to the mesh plus padding, or set.
-                int custom = options.axes.radius > 0 ? 1 : 0;
-                FieldLabel("Radius");
-                if (Segmented("##ring_radius_mode", &custom, {"Fit mesh", "Custom"})) {
-                    options.axes.radius = custom ? std::max(1e-6f, extent*.5f) : 0; changed = true;
-                }
-                if (custom) {
-                    FieldLabel("Ring radius");
-                    changed |= ImGui::DragFloat("##ring_radius", &options.axes.radius, extent*.002f, 1e-6f, extent*100, "%.4g", ImGuiSliderFlags_AlwaysClamp);
-                    Tip("Radius of the rings and the length of the radial ruler, in mesh units.");
-                } else {
-                    float percent = options.axes.padding*100;
-                    FieldLabel("Padding");
-                    if (ImGui::SliderFloat("##ring_padding", &percent, -50, 100, "%.0f%%")) { options.axes.padding = percent/100; changed = true; }
-                    Tip("Rings sit this far outside the mesh radius. Negative values draw them inside.");
-                }
-                FieldLabel("Angle step");
-                int step = options.axes.angleStep;
-                const int steps[] = {10, 15, 30, 45, 60, 90};
-                if (ImGui::BeginCombo("##angle_step", (std::to_string(step) + "°").c_str())) {
-                    for (int value : steps) if (ImGui::Selectable((std::to_string(value) + "°").c_str(), value == step)) { options.axes.angleStep = value; changed = true; }
-                    ImGui::EndCombo();
-                }
-            }
-            if (options.axes.style != AxesStyle::None) {
-                int hidden = options.axes.showHidden ? 0 : 1;
-                FieldLabel("Behind mesh");
-                if (Segmented("##hidden_axes", &hidden, {"Dashed", "Hidden"})) { options.axes.showHidden = hidden == 0; changed = true; }
-            }
+            changed |= AxesControls(options.axes, scene.bounds, true);
             EndSection();
         }
         if (BeginSection("Ticks and labels")) {
@@ -449,6 +503,40 @@ private:
         return changed;
     }
 
+    // Settings beside the preview in the floating window; in the narrow side
+    // column, the preview above the settings.
+    void Contents(const Scene& scene, bool docked) {
+        if (!scene.hasMesh) {
+            ImGui::TextDisabled("Nothing to export yet: no surface is shown.");
+            return;
+        }
+        // A locked aspect follows the view, which pinning and resizing change.
+        if (options.lockAspect) {
+            const int height = std::max(16, int(std::lround(options.width*scene.viewport.y/std::max(1.f, scene.viewport.x))));
+            if (height != options.height) { options.height = height; previewDirty = true; }
+        }
+        const float footer = ImGui::GetFrameHeightWithSpacing()*2.2f;
+        if (docked) {
+            const float available = ImGui::GetContentRegionAvail().y - footer;
+            ImGui::BeginChild("figure preview", {0, std::clamp(available*.4f, 140.f, 460.f)}, ImGuiChildFlags_Borders);
+            DrawPreview(scene, false);
+            ImGui::EndChild();
+            ImGui::BeginChild("figure options", {0, -footer}, ImGuiChildFlags_None);
+            Controls(scene);
+            ImGui::EndChild();
+        } else {
+            const float controls = 360;
+            ImGui::BeginChild("figure options", {controls, -footer}, ImGuiChildFlags_None);
+            const bool changed = Controls(scene);
+            ImGui::EndChild();
+            ImGui::SameLine();
+            ImGui::BeginChild("figure preview", {0, -footer}, ImGuiChildFlags_Borders);
+            DrawPreview(scene, changed);
+            ImGui::EndChild();
+        }
+        Footer(scene);
+    }
+
     // Render the scene at size*supersample and lay out the overlay.
     struct Rendered { RenderTexture2D target{}; Layout layout; int scale = 1; Vector2 size{}; };
     Rendered RenderAt(const Scene& scene, Vector2 size, float pxPerPt, int supersample) const {
@@ -500,15 +588,7 @@ private:
         EndBlendMode();
         rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
         BeginBlendMode(BLEND_CUSTOM_SEPARATE);
-        for (const auto& f : r.layout.overlay.fills)
-            DrawRectangleRec({f.box.x*s, f.box.y*s, f.box.width*s, f.box.height*s}, f.color);
-        for (const auto& stroke : r.layout.overlay.strokes) DrawStroke(stroke, s);
-        if (text) {
-            for (const auto& l : r.layout.overlay.labels) {
-                const Vector2 size = MeasureTextEx(font, l.plain.c_str(), l.size*s, 0);
-                DrawTextEx(font, l.plain.c_str(), {std::round(l.at.x*s - l.align.x*size.x), std::round(l.at.y*s - l.align.y*size.y)}, l.size*s, 0, l.color);
-            }
-        }
+        DrawOverlay(r.layout.overlay, s, text ? &font : nullptr);
         EndBlendMode();
         EndTextureMode();
         if (loaded) UnloadFont(font);
@@ -519,40 +599,17 @@ private:
         if (r.scale > 1) ImageResize(&image, int(canvas.x), int(canvas.y));
         return image;
     }
-    static void DrawStroke(const Stroke& stroke, float s) {
-        const float width = std::max(1.f, stroke.width*s);
-        auto segment = [&](Vector2 a, Vector2 b) {
-            DrawLineEx(Vector2Scale(a, s), Vector2Scale(b, s), width, stroke.color);
-            if (stroke.color.a == 255 && width > 2) DrawCircleV(Vector2Scale(b, s), width*.5f, stroke.color);
-        };
-        if (!stroke.dashed) {
-            for (std::size_t i = 1; i < stroke.points.size(); ++i) segment(stroke.points[i - 1], stroke.points[i]);
-            return;
-        }
-        // Dashes measured along the whole polyline, as in PDF and TikZ.
-        const float on = stroke.width*4 + 2, off = stroke.width*3 + 2;
-        float phase = 0;
-        for (std::size_t i = 1; i < stroke.points.size(); ++i) {
-            const Vector2 a = stroke.points[i - 1], b = stroke.points[i];
-            const float length = Vector2Distance(a, b);
-            float t = 0;
-            while (t < length) {
-                const float cycle = std::fmod(phase + t, on + off);
-                const bool drawing = cycle < on;
-                const float step = std::min(length - t, drawing ? on - cycle : on + off - cycle);
-                if (drawing) segment(Vector2Lerp(a, b, t/length), Vector2Lerp(a, b, (t + step)/length));
-                t += std::max(step, 1e-3f);
-            }
-            phase += length;
-        }
-    }
-
     void DrawPreview(const Scene& scene, bool changed) {
         const ImVec2 available = ImGui::GetContentRegionAvail();
         const double now = GetTime();
-        if (changed || previewDirty || now - previewAt > .5) {
+        const Camera3D& c = scene.camera;
+        const bool moved = !Vector3Equals(c.position, previewCamera.position) || !Vector3Equals(c.target, previewCamera.target) ||
+                           !Vector3Equals(c.up, previewCamera.up) || c.fovy != previewCamera.fovy || c.projection != previewCamera.projection;
+        // While the view moves, the preview keeps up at about 20 frames a second.
+        if (changed || previewDirty || now - previewAt > .5 || (moved && now - previewAt > .05)) {
             previewAt = now;
             previewDirty = false;
+            previewCamera = c;
             // Fit the whole canvas, labels included, in the panel.
             const Vector2 full{float(options.width), float(options.height)};
             const float pxPerPt = options.dpi/72;
@@ -613,7 +670,7 @@ private:
         if (ToggleButton(ICON_FA_FILE_EXPORT "  Export", true, {120, 0})) StartExport(scene);
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Close", {-1, 0})) ImGui::CloseCurrentPopup();
+        if (ImGui::Button("Close", {-1, 0})) open = false;
     }
 
     void StartExport(const Scene& scene) {

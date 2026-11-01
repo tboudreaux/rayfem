@@ -18,16 +18,19 @@ void Near(Vector3 a, Vector3 b, const std::string& message, float tolerance = 1e
 }
 
 void CameraPath() {
-    Check(!CameraAt({}, 3, Easing::Linear), "No keyframes: no path");
+    Check(!CameraAt({}, 3), "No keyframes: no path");
     // Front view at frame 0, from +X at frame 10 twice as far, target moved.
     Camera3D front{{0, 0, 4}, {0, 0, 0}, {0, 1, 0}, 40, CAMERA_PERSPECTIVE};
     Camera3D side{{18, 1, 0}, {2, 1, 0}, {0, 1, 0}, 30, CAMERA_PERSPECTIVE};
     std::vector<Keyframe> keys{KeyframeFrom(side, 10), KeyframeFrom(front, 0)};
     SortKeyframes(keys);
+    Check(keys.front().easing == Easing::EaseInOut, "Keyframes ease in and out by default");
+    const auto eased = keys;
+    for (auto& key : keys) key.easing = Easing::Linear;
     Check(keys.front().time == 0 && keys.back().time == 10, "Keyframes sort by time");
-    Near(CameraAt(keys, -5, Easing::Linear)->position, front.position, "The first keyframe holds before it");
-    Near(CameraAt(keys, 20, Easing::Linear)->position, side.position, "The last keyframe holds after it");
-    const Camera3D middle = *CameraAt(keys, 5, Easing::Linear);
+    Near(CameraAt(keys, -5)->position, front.position, "The first keyframe holds before it");
+    Near(CameraAt(keys, 20)->position, side.position, "The last keyframe holds after it");
+    const Camera3D middle = *CameraAt(keys, 5);
     Near(middle.target, {1, .5f, 0}, "The target moves linearly");
     const float distance = Vector3Distance(middle.position, middle.target);
     Check(std::abs(distance - 8) < 1e-3f, "Distance changes geometrically: sqrt(4*16) = 8, got " + std::to_string(distance));
@@ -35,14 +38,14 @@ void CameraPath() {
     Near(back, Vector3Normalize({1, 0, 1}), "Halfway between front and side views looks from 45°");
     Check(std::abs(middle.fovy - 35) < 1e-4f, "Field of view interpolates");
     // Easing lags at the start and leads at the end, matching at the middle.
-    const Vector3 early = CameraAt(keys, 1, Easing::EaseInOut)->target, earlyLinear = CameraAt(keys, 1, Easing::Linear)->target;
+    const Vector3 early = CameraAt(eased, 1)->target, earlyLinear = CameraAt(keys, 1)->target;
     Check(early.x < earlyLinear.x, "Easing starts slowly");
-    Near(CameraAt(keys, 5, Easing::EaseInOut)->target, middle.target, "Easing is symmetric");
+    Near(CameraAt(eased, 5)->target, middle.target, "Easing is symmetric");
     // Opposite-signed quaternions describe the same view: no detour.
     std::vector<Keyframe> flipped = keys;
     flipped.back().orientation = {-flipped.back().orientation.x, -flipped.back().orientation.y,
                                   -flipped.back().orientation.z, -flipped.back().orientation.w};
-    Near(Vector3Normalize(Vector3Subtract(CameraAt(flipped, 5, Easing::Linear)->position, middle.target)), back,
+    Near(Vector3Normalize(Vector3Subtract(CameraAt(flipped, 5)->position, middle.target)), back,
          "Interpolation takes the shorter rotation");
 }
 
@@ -56,16 +59,57 @@ void SceneKeyframes() {
     SceneState c = b;
     c.clip = false;
     std::vector<Keyframe> keys{KeyframeFrom(a, 0), KeyframeFrom(b, 2), KeyframeFrom(c, 4)};
-    const auto middle = *StateAt(keys, 1, Easing::Linear);
+    ApplyEasingPreset(keys, EasingPreset::Constant);
+    const auto middle = *StateAt(keys, 1);
     Check(middle.clip, "The cut stays on between keyframes that both cut");
     Near(middle.clip_point, {1, 0, 0}, "The cut plane moves");
     Near(middle.clip_normal, Vector3Normalize({1, 1, 0}), "The cut plane turns");
     Check(middle.annotations == std::vector<uint32_t>{1}, "Annotations switch at the next keyframe");
-    const auto later = *StateAt(keys, 3, Easing::Linear);
+    const auto later = *StateAt(keys, 3);
     Check(later.clip && later.annotations.size() == 2, "Switches hold until the next keyframe");
     Near(later.clip_point, {2, 0, 0}, "A cut switching off does not move");
-    Check(!StateAt(keys, 4, Easing::Linear)->clip && !StateAt(keys, 9, Easing::Linear)->clip, "The cut is off from its keyframe on");
-    Check(StateAt(keys, -1, Easing::Linear)->annotations == std::vector<uint32_t>{1}, "Before the first keyframe its scene holds");
+    Check(!StateAt(keys, 4)->clip && !StateAt(keys, 9)->clip, "The cut is off from its keyframe on");
+    Check(StateAt(keys, -1)->annotations == std::vector<uint32_t>{1}, "Before the first keyframe its scene holds");
+}
+
+// Each move follows the easing of the keyframe it leaves.
+void PerKeyframeEasing() {
+    for (const Easing easing : Easings) {
+        Check(Ease(easing, 0) == 0 && Ease(easing, 1) == 1, std::string(EasingName(easing)) + " runs from 0 to 1");
+        for (int i = 1; i <= 100; ++i)
+            Check(Ease(easing, i / 100.0) >= Ease(easing, (i - 1) / 100.0), std::string(EasingName(easing)) + " never goes back");
+    }
+    // Speeds where moves meet: ease in arrives, and ease out leaves, at constant speed.
+    const double h = 1e-6;
+    auto slope = [&](Easing e, double u) { return (Ease(e, std::min(1.0, u + h)) - Ease(e, std::max(0.0, u - h))) / (std::min(1.0, u + h) - std::max(0.0, u - h)); };
+    Check(std::abs(slope(Easing::EaseIn, 0)) < 1e-5 && std::abs(slope(Easing::EaseIn, 1) - 1) < 1e-5, "Ease in: from rest to constant speed");
+    Check(std::abs(slope(Easing::EaseOut, 0) - 1) < 1e-5 && std::abs(slope(Easing::EaseOut, 1)) < 1e-5, "Ease out: from constant speed to rest");
+    Check(std::abs(slope(Easing::EaseInOut, 0)) < 1e-5 && std::abs(slope(Easing::EaseInOut, 1)) < 1e-5, "Ease in and out pauses at both ends");
+
+    // A target moving 0 -> 1 -> 2 -> 3 over one second each, eased per move.
+    auto key = [](float x, double time, Easing easing) {
+        Keyframe k = KeyframeFrom(Camera3D{{x, 0, 4}, {x, 0, 0}, {0, 1, 0}, 40, CAMERA_PERSPECTIVE}, time);
+        k.easing = easing;
+        return k;
+    };
+    std::vector<Keyframe> keys{key(0, 0, Easing::EaseIn), key(1, 1, Easing::Linear), key(2, 2, Easing::EaseOut), key(3, 3, Easing::Hold)};
+    auto x = [&](double t) { return CameraAt(keys, t)->target.x; };
+    auto speed = [&](double t) { return (x(t + 1e-4) - x(t - 1e-4)) / 2e-4; };
+    Check(std::abs(speed(1e-4)) < 1e-2, "The continuous move starts from rest");
+    Check(std::abs(speed(1) - 1) < 1e-2 && std::abs(speed(2) - 1) < 1e-2, "It keeps its pace through the middle keyframes");
+    Check(std::abs(x(1.5) - 1.5) < 1e-4, "Constant speed in the middle");
+    Check(std::abs(speed(3 - 1e-4)) < 2e-2, "It comes to rest at the end");
+    // A hold keeps its keyframe's scene, then cuts.
+    keys = {key(0, 0, Easing::Hold), key(5, 1, Easing::Linear)};
+    Check(x(.99) == 0 && x(1) == 5, "A hold stays put, then cuts at the next keyframe");
+    // Presets.
+    keys = {key(0, 0, Easing::Hold), key(1, 1, Easing::Hold), key(2, 2, Easing::Hold), key(3, 3, Easing::Hold)};
+    ApplyEasingPreset(keys, EasingPreset::Continuous);
+    Check(keys[0].easing == Easing::EaseIn && keys[1].easing == Easing::Linear && keys[2].easing == Easing::EaseOut,
+          "One continuous move: ease in, constant speed, ease out");
+    keys.resize(2);
+    ApplyEasingPreset(keys, EasingPreset::Continuous);
+    Check(keys[0].easing == Easing::EaseInOut, "A single move eases at both ends");
 }
 
 void MovieTiming() {
@@ -139,6 +183,7 @@ int main() {
     try {
         CameraPath();
         SceneKeyframes();
+        PerKeyframeEasing();
         MovieTiming();
         Encode();
         std::cout << "movie passed\n";

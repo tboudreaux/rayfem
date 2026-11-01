@@ -32,7 +32,51 @@ struct SceneState {
     std::vector<uint32_t> annotations;
 };
 
-// A scene at a moment of the movie, in seconds from its start.
+// How the scene moves from a keyframe to the next one. Constant speed, ease
+// in and ease out meet at the same pace (when neighbouring moves take about
+// as long and go about as far), so ease in, constant speed, then ease out is
+// one continuous move that starts and stops gently.
+enum class Easing {
+    EaseInOut,  // starts and stops gently: a pause at both keyframes
+    Linear,     // constant speed
+    EaseIn,     // starts from rest, arrives at constant speed
+    EaseOut,    // leaves at constant speed, comes to rest
+    Hold,       // stays at this keyframe, then cuts to the next
+};
+inline constexpr Easing Easings[] = {Easing::EaseInOut, Easing::Linear, Easing::EaseIn, Easing::EaseOut, Easing::Hold};
+inline const char* EasingName(Easing easing) {
+    switch (easing) {
+    case Easing::Linear: return "Constant speed";
+    case Easing::EaseIn: return "Ease in";
+    case Easing::EaseOut: return "Ease out";
+    case Easing::Hold: return "Hold, then cut";
+    default: return "Ease in and out";
+    }
+}
+inline const char* EasingDescription(Easing easing) {
+    switch (easing) {
+    case Easing::Linear: return "Moves at one speed the whole way, with no pause at either keyframe.";
+    case Easing::EaseIn: return "Starts from rest and speeds up, arriving at constant speed: begin a continuous move with it.";
+    case Easing::EaseOut: return "Leaves at constant speed and slows to rest: end a continuous move with it.";
+    case Easing::Hold: return "Stays at this keyframe's scene, then cuts to the next one at its moment.";
+    default: return "Starts and stops gently, pausing at both keyframes.";
+    }
+}
+// Progress along a move (0 to 1) at the fraction u of its time. Ease in and
+// out are cubics whose speed is the constant-speed move's at the end they share.
+inline double Ease(Easing easing, double u) {
+    u = std::clamp(u, 0.0, 1.0);
+    switch (easing) {
+    case Easing::Linear: return u;
+    case Easing::EaseIn: return u * u * (2 - u);
+    case Easing::EaseOut: return u * (1 + u * (1 - u));
+    case Easing::Hold: return u < 1 ? 0 : 1;
+    default: return CameraViewEase(u);
+    }
+}
+
+// A scene at a moment of the movie, in seconds from its start, and how the
+// scene moves on from it to the next keyframe.
 struct Keyframe {
     double time = 0;
     Vector3 target{};
@@ -43,6 +87,7 @@ struct Keyframe {
     Vector3 clip_point{}, clip_normal{1, 0, 0};
     int clip_mode = 0;
     std::vector<uint32_t> annotations;
+    Easing easing = Easing::EaseInOut;
 };
 
 inline Keyframe KeyframeFrom(const SceneState& state, double time) {
@@ -62,15 +107,13 @@ inline SceneState StateFrom(const Keyframe& key, int projection = CAMERA_PERSPEC
     return {CameraFrom(key, projection), key.clip, key.clip_point, key.clip_normal, key.clip_mode, key.annotations};
 }
 
-enum class Easing { EaseInOut, Linear };
-
 // The scene at time along the keyframes (sorted by time). Before the first
 // and after the last keyframe it holds still. The camera takes the shortest
 // rotation, zooms geometrically and moves its target in a straight line;
 // a cut on at both keyframes moves its plane smoothly. Switches (a cut
 // turning on or off, its mode, which annotations show) take effect at the
-// next keyframe. EaseInOut slows to a stop at every keyframe.
-inline std::optional<SceneState> StateAt(const std::vector<Keyframe>& keys, double time, Easing easing,
+// next keyframe. Each move follows the easing of the keyframe it leaves.
+inline std::optional<SceneState> StateAt(const std::vector<Keyframe>& keys, double time,
                                          int projection = CAMERA_PERSPECTIVE) {
     if (keys.empty()) return std::nullopt;
     if (time <= keys.front().time) return StateFrom(keys.front(), projection);
@@ -80,9 +123,7 @@ inline std::optional<SceneState> StateAt(const std::vector<Keyframe>& keys, doub
     const Keyframe& a = *std::prev(next);
     const Keyframe& b = *next;
     const double span = b.time - a.time;
-    double s = span > 0 ? (time - a.time) / span : 1;
-    if (easing == Easing::EaseInOut) s = CameraViewEase(s);
-    const float t = static_cast<float>(s);
+    const float t = static_cast<float>(Ease(a.easing, span > 0 ? (time - a.time) / span : 1));
     Quaternion to = b.orientation;
     if (a.orientation.x * to.x + a.orientation.y * to.y + a.orientation.z * to.z + a.orientation.w * to.w < 0)
         to = {-to.x, -to.y, -to.z, -to.w};
@@ -98,14 +139,25 @@ inline std::optional<SceneState> StateAt(const std::vector<Keyframe>& keys, doub
     }
     return StateFrom(mixed, projection);
 }
-inline std::optional<Camera3D> CameraAt(const std::vector<Keyframe>& keys, double time, Easing easing,
+inline std::optional<Camera3D> CameraAt(const std::vector<Keyframe>& keys, double time,
                                         int projection = CAMERA_PERSPECTIVE) {
-    if (auto state = StateAt(keys, time, easing, projection)) return state->camera;
+    if (auto state = StateAt(keys, time, projection)) return state->camera;
     return std::nullopt;
 }
 
 inline void SortKeyframes(std::vector<Keyframe>& keys) {
     std::stable_sort(keys.begin(), keys.end(), [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
+}
+
+// Easing presets for every move at once.
+enum class EasingPreset { Smooth, Constant, Continuous };
+inline void ApplyEasingPreset(std::vector<Keyframe>& keys, EasingPreset preset) {
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (preset == EasingPreset::Smooth) keys[i].easing = Easing::EaseInOut;
+        else if (preset == EasingPreset::Constant) keys[i].easing = Easing::Linear;
+        else keys[i].easing = keys.size() <= 2 ? Easing::EaseInOut
+                             : i == 0 ? Easing::EaseIn : i + 2 == keys.size() ? Easing::EaseOut : Easing::Linear;
+    }
 }
 
 // Video timing: each shown frame is held for seconds_per_frame, or, with a

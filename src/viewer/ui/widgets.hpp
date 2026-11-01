@@ -238,4 +238,47 @@ inline bool Scrubber(const char* id, int* value, int count, float width, const s
     return changed;
 }
 
+// Tools that float or sit pinned in the viewer's side column (the figure and
+// movie exporters). Floating, a pin button sits in the window's title bar,
+// left of its close button; pinned, a header row gives the title, an unpin
+// button and a close button.
+inline void TitleBarPin(bool& pinned) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->Flags & ImGuiWindowFlags_NoTitleBar) return;
+    const ImRect bar = window->TitleBarRect();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float size = ImGui::GetFontSize();
+    // Where ImGui puts its close button, one button further left.
+    const ImVec2 at{bar.Max.x - style.FramePadding.x - 2*size - style.ItemInnerSpacing.x, bar.Min.y + style.FramePadding.y};
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    ImGui::PushClipRect(bar.Min, bar.Max, false);
+    ImGui::SetCursorScreenPos(at);
+    if (ImGui::InvisibleButton("##pin", {size, size})) pinned = true;
+    const bool hovered = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+    auto* draw = ImGui::GetWindowDrawList();
+    const ImVec2 center{at.x + size*.5f, at.y + size*.5f};
+    if (hovered) draw->AddCircleFilled(center, size*.5f + 1, ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered));
+    ImGui::PushFont(nullptr, size*.75f);
+    const ImVec2 icon = ImGui::CalcTextSize(ICON_FA_THUMBTACK);
+    draw->AddText({center.x - icon.x*.5f, center.y - icon.y*.5f}, ImGui::GetColorU32(ImGuiCol_Text), ICON_FA_THUMBTACK);
+    ImGui::PopFont();
+    ImGui::PopClipRect();
+    if (hovered) ImGui::SetTooltip("Pin to the right of the view");
+    ImGui::SetCursorScreenPos(cursor);
+}
+
+inline void PinnedHeader(const char* title, bool& pinned, bool& open) {
+    // The regular face: the heading face has no icon glyphs.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(title);
+    const float button = ImGui::GetFrameHeight();
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 2*button - ImGui::GetStyle().ItemSpacing.x));
+    if (ToggleButton(ICON_FA_THUMBTACK "##unpin", true, {button, button})) pinned = false;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Unpin to a floating window");
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_XMARK "##close", {button, button})) open = false;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Close");
+    ImGui::Separator();
+}
+
 } // namespace RayFEM::UI

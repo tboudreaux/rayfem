@@ -3,7 +3,8 @@
 // The Movie window: the frames the timeline shows, scene keyframes placed
 // from the live view on the movie's own timeline, a preview, and H.264
 // export through ffmpeg. It is a floating window, not a modal dialog, so the
-// view stays usable for arranging each keyframe.
+// view stays usable for arranging each keyframe; it can also be pinned to the
+// viewer's side column.
 //
 // Keyframes sit at times in the movie, not at data frames, so a movie of a
 // single frame (one converged model, say) can still move the camera, cut and
@@ -30,10 +31,14 @@ struct Host {
     std::function<Vector2()> viewport;                 // the view's size in pixels
     std::function<int(int, int)> capture;              // keep shown frames first..last for an export; returns how many
     std::function<bool(int)> ready;                    // select a captured frame; true once its surface is built
-    std::function<bool(const Camera3D&, int, int, int, std::vector<unsigned char>&)> render; // camera, width, height, supersample, RGBA
+    std::function<bool(const Camera3D&, int, int, int, bool, std::vector<unsigned char>&)> render; // camera, width, height, supersample, axes, RGBA
+    std::function<bool()> axesShown;                   // whether the view shows its axes
     std::function<void(Camera3D&, double)> spin;       // turn a camera by radians about the Spin menu's axis
     std::function<void()> release;                     // the export ended: drop the capture
 };
+
+// Whether a movie draws the view's axes: when the view shows them, always or never.
+enum class AxesMode { AsInView, On, Off };
 
 class Exporter {
 public:
@@ -51,6 +56,8 @@ public:
         }
     }
     bool IsOpen() const { return open; }
+    bool Pinned() const { return open && pinned; }
+    void Pin(bool on) { pinned = on; }
     bool Exporting() const { return job != nullptr; }
     const std::string& Status() const { return status; }
     bool Failed() const { return failed; }
@@ -64,6 +71,7 @@ public:
     // A total length in seconds instead of seconds per frame; 0 restores per frame.
     void SetLength(double seconds) { totalLength = seconds > 0; if (seconds > 0) totalSeconds = seconds; }
     void SetSpin(bool on, double turns = 1) { includeSpin = on; spinTurns = turns; }
+    void SetAxes(AxesMode mode) { axes = mode; }
     void Export(const Host& host, const std::string& path) {
         std::snprintf(output, sizeof(output), "%s", path.c_str());
         Start(host);
@@ -83,7 +91,7 @@ public:
                 return;
             }
             std::string error;
-            if (!host.render(scene.camera, j.width, j.height, j.supersample, j.rgba)) { Finish(host, "Could not render the frame"); return; }
+            if (!host.render(scene.camera, j.width, j.height, j.supersample, j.axes, j.rgba)) { Finish(host, "Could not render the frame"); return; }
             if (!j.writer.Write(j.rgba, error)) { Finish(host, error); return; }
             ++j.n;
             j.waiting = GetTime();
@@ -94,17 +102,29 @@ public:
         Finish(host, {});
     }
 
+    // Call every frame. While pinned, the viewer calls DrawPinned in its side
+    // column instead of the floating window.
     void Draw(const Host& host) {
         Step(host);
-        if (!open) return;
+        if (!open || pinned) return;
         const ImVec2 display = ImGui::GetIO().DisplaySize;
         ImGui::SetNextWindowSize({440, std::min(760.f, display.y - 120)}, ImGuiCond_Appearing);
         ImGui::SetNextWindowPos({display.x - 480, 100}, ImGuiCond_Appearing);
         if (focus) { ImGui::SetNextWindowFocus(); focus = false; }
-        if (!ImGui::Begin(ICON_FA_FILM "  Movie###movie", &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse)) {
-            ImGui::End();
-            return;
+        if (ImGui::Begin(ICON_FA_FILM "  Movie###movie", &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse)) {
+            TitleBarPin(pinned);
+            Contents(host);
         }
+        ImGui::End();
+    }
+    void DrawPinned(const Host& host) {
+        if (!open || !pinned) return;
+        PinnedHeader(ICON_FA_FILM "  Movie", pinned, open);
+        Contents(host);
+    }
+
+private:
+    void Contents(const Host& host) {
         const int count = host.frames();
         // The settings scroll; Export and progress stay at the bottom.
         const float footer = ImGui::GetFrameHeightWithSpacing() * (status.empty() ? 1.6f : 3.2f);
@@ -112,25 +132,23 @@ public:
         ImGui::BeginDisabled(job != nullptr);
         Frames(host, count);
         Timeline(host, count);
-        Output();
+        Output(host);
         ImGui::EndDisabled();
         ImGui::EndChild();
         Footer(host, count);
-        ImGui::End();
     }
 
-private:
     // What decides the scene at each moment.
     struct Plan {
         Timing timing;
         std::vector<Keyframe> keys;
-        Easing easing = Easing::EaseInOut;
         SceneState start;
         bool spin = false;
         double turns = 1;
     };
     struct Job : Plan {
         int n = 0, total = 0, width = 0, height = 0, supersample = 1;
+        bool axes = false;
         double waiting = 0;
         Writer writer;
         std::vector<unsigned char> rgba;
@@ -149,13 +167,13 @@ private:
     // when the export started, then the spin: turns spread over the whole
     // movie, so a whole number of turns loops seamlessly.
     SceneState StateFor(const Plan& j, int n) const {
-        SceneState scene = StateAt(j.keys, n / j.timing.fps, j.easing, j.start.camera.projection).value_or(j.start);
+        SceneState scene = StateAt(j.keys, n / j.timing.fps, j.start.camera.projection).value_or(j.start);
         if (j.spin && spinner) spinner(scene.camera, 2 * PI * j.turns * n / j.timing.VideoFrames());
         return scene;
     }
     Plan Probe(const SceneState& start) const {
         Plan probe;
-        probe.timing = MovieTiming(); probe.keys = keys; probe.easing = easing; probe.start = start;
+        probe.timing = MovieTiming(); probe.keys = keys; probe.start = start;
         probe.spin = includeSpin; probe.turns = spinTurns;
         return probe;
     }
@@ -231,7 +249,11 @@ private:
         if (ImGui::Button(ICON_FA_PLUS "  Add keyframe here")) {
             const double at = PreviewTime();
             std::erase_if(keys, [&](const Keyframe& k) { return std::abs(k.time - at) < .5 / fps; });
-            keys.push_back(KeyframeFrom(host.state(), at));
+            Keyframe key = KeyframeFrom(host.state(), at);
+            // A new keyframe moves on as the one before it does.
+            const auto before = std::find_if(keys.rbegin(), keys.rend(), [&](const Keyframe& k) { return k.time < at; });
+            if (before != keys.rend()) key.easing = before->easing;
+            keys.push_back(std::move(key));
             SortKeyframes(keys);
         }
         Tip("Record the view on screen now (camera, cut and visible annotations) at the preview's moment. "
@@ -267,21 +289,40 @@ private:
             }
             Tip("Go to this keyframe: its moment, frame and scene");
             ImGui::SameLine();
-            if (ImGui::Button(ICON_FA_CAMERA)) key = KeyframeFrom(host.state(), key.time);
+            if (ImGui::Button(ICON_FA_CAMERA)) {
+                const Easing kept = key.easing;
+                key = KeyframeFrom(host.state(), key.time);
+                key.easing = kept;
+            }
             Tip("Replace with the scene on screen now");
             ImGui::SameLine();
             if (ImGui::Button(ICON_FA_TRASH_CAN)) remove = static_cast<int>(i);
             Tip("Remove this keyframe");
+            if (i + 1 < keys.size()) Move(key, keys[i + 1].time - key.time);
             ImGui::PopID();
         }
         if (remove >= 0) keys.erase(keys.begin() + remove);
         // Reorder once a time drag ends, so rows do not jump under the pointer.
         if (retimed) pendingSort = true;
         if (pendingSort && !ImGui::IsAnyItemActive()) { SortKeyframes(keys); pendingSort = false; }
-        FieldLabel("Between keyframes");
-        int ease = easing == Easing::Linear ? 1 : 0;
-        if (Segmented("##movie_easing", &ease, {"Ease in and out", "Constant speed"}))
-            easing = ease == 1 ? Easing::Linear : Easing::EaseInOut;
+        if (keys.size() >= 2) {
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##movie_presets", "Set every move...")) {
+                const struct { EasingPreset preset; const char* name; const char* tip; } presets[] = {
+                    {EasingPreset::Smooth, "Ease in and out", "Every move starts and stops gently, pausing at each keyframe."},
+                    {EasingPreset::Constant, "Constant speed", "Every move at one speed, with no pauses."},
+                    {EasingPreset::Continuous, "One continuous move",
+                     "Ease in from the first keyframe, constant speed through the middle ones, ease out into the last: "
+                     "a single gliding move that starts and stops gently."},
+                };
+                for (const auto& p : presets) {
+                    if (ImGui::Selectable(p.name)) ApplyEasingPreset(keys, p.preset);
+                    Tip(p.tip);
+                }
+                ImGui::EndCombo();
+            }
+            Tip("Choose how every move between keyframes eases at once; each move's own menu changes just that one.");
+        }
         Switch("Spin the view", &includeSpin);
         Tip("Turn the camera about the axis chosen in the toolbar's Spin menu, on top of any keyframes.");
         if (includeSpin) {
@@ -294,7 +335,56 @@ private:
         EndSection();
     }
 
-    void Output() {
+    // The move from a keyframe to the next: its speed profile, easing and length.
+    void Move(Keyframe& key, double seconds) {
+        ImGui::Indent(18);
+        const float size = ImGui::GetFrameHeight();
+        EasingCurve(key.easing, size);
+        Tip(EasingDescription(key.easing));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(150);
+        if (ImGui::BeginCombo("##easing", EasingName(key.easing))) {
+            for (const Easing easing : Easings) {
+                ImGui::PushID(static_cast<int>(easing));
+                const ImVec2 at = ImGui::GetCursorPos();
+                if (ImGui::Selectable("##choice", easing == key.easing, 0, {0, size})) key.easing = easing;
+                Tip(EasingDescription(easing));
+                ImGui::SetCursorPos(at);
+                EasingCurve(easing, size);
+                ImGui::SameLine();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(EasingName(easing));
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        Tip("How the scene moves from this keyframe to the next");
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled(ICON_FA_ARROW_DOWN " %.2f s", seconds);
+        ImGui::Unindent(18);
+    }
+    // Progress against time for an easing, in a small square.
+    static void EasingCurve(Easing easing, float size) {
+        const ImVec2 corner = ImGui::GetCursorScreenPos();
+        ImGui::Dummy({size, size});
+        auto* draw = ImGui::GetWindowDrawList();
+        const float pad = 4, side = size - 2 * pad;
+        const ImVec2 lo{corner.x + pad, corner.y + pad}, hi{corner.x + size - pad, corner.y + size - pad};
+        draw->AddRect(lo, hi, WithAlpha(Palette().muted, 70), 2);
+        ImVec2 points[33];
+        int count = 0;
+        for (int i = 0; i <= 30; ++i) {
+            const double u = i / 30.0;
+            // A hold stays flat to the end, then cuts straight up.
+            const double progress = easing == Easing::Hold ? 0 : Ease(easing, u);
+            points[count++] = {lo.x + side * static_cast<float>(u), hi.y - side * static_cast<float>(progress)};
+        }
+        if (easing == Easing::Hold) points[count++] = {hi.x, lo.y};
+        draw->AddPolyline(points, count, Palette().accent, 0, 1.6f);
+    }
+
+    void Output(const Host& host) {
         if (!BeginSection("Output")) return;
         FieldLabel("Size");
         ImGui::SetNextItemWidth(90);
@@ -316,6 +406,11 @@ private:
         ImGui::SetNextItemWidth(-1);
         ImGui::SliderInt("##movie_quality", &quality, 12, 34, quality <= 18 ? "%d (visually lossless)" : "%d", ImGuiSliderFlags_AlwaysClamp);
         Tip("x264's constant rate factor: lower is larger and sharper. 18 to 23 suits most figures.");
+        FieldLabel("Axes");
+        int mode = static_cast<int>(axes);
+        if (Segmented("##movie_axes", &mode, {"As in view", "On", "Off"})) axes = static_cast<AxesMode>(mode);
+        Tip(host.axesShown && host.axesShown() ? "Axes over the mesh, styled under View > Axes. The view shows them now."
+                                               : "Axes over the mesh, styled under View > Axes. The view hides them now.");
         FieldLabel("File");
         ImGui::SetNextItemWidth(-1);
         ImGui::InputText("##movie_path", output, sizeof(output));
@@ -364,9 +459,10 @@ private:
         next->timing = {captured, fps, secondsPerFrame, totalLength ? totalSeconds : 0};
         next->total = next->timing.VideoFrames();
         next->width = EvenSize(width); next->height = EvenSize(height); next->supersample = supersample;
-        next->keys = keys; next->easing = easing; next->start = host.state();
+        next->keys = keys; next->start = host.state();
         next->spin = includeSpin; next->turns = spinTurns; next->path = output;
         next->restoreFrame = restore;
+        next->axes = axes == AxesMode::On || (axes == AxesMode::AsInView && host.axesShown && host.axesShown());
         next->waiting = GetTime();
         next->rgba.resize(static_cast<size_t>(next->width) * next->height * 4);
         spinner = host.spin;
@@ -398,7 +494,8 @@ private:
         }
     }
 
-    bool open = false, focus = false, discovered = false;
+    bool open = false, focus = false, pinned = false, discovered = false;
+    AxesMode axes = AxesMode::AsInView;
     Encoder encoder;
     int first = 0, last = -1;
     double fps = 30, secondsPerFrame = .2;
@@ -407,7 +504,6 @@ private:
     int width = 0, height = 0, supersample = 2, quality = 20;
     char output[512] = "rayfem-exports/movie.mp4";
     std::vector<Keyframe> keys;
-    Easing easing = Easing::EaseInOut;
     bool includeSpin = false;
     double spinTurns = 1;
     int previewFrame = 0;

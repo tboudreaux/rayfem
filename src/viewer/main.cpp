@@ -980,7 +980,10 @@ private:
         ImGui::PopItemWidth();
         ImGui::EndChild();
         ImGui::SameLine();
-        ImGui::BeginChild("Workspace",{0,0},ImGuiChildFlags_AlwaysUseWindowPadding);
+        // Pinned exporters take a column right of the workspace.
+        const bool docked=figureExporter.Pinned() || movieExporter.Pinned();
+        const float dock=docked?std::clamp(dockWidth,320.0f,std::max(320.0f,ImGui::GetContentRegionAvail().x*.6f)):0;
+        ImGui::BeginChild("Workspace",{docked?-(dock+DockSplitterWidth+2*style.ItemSpacing.x):0,0},ImGuiChildFlags_AlwaysUseWindowPadding);
         DrawToolbar();
         const float available=ImGui::GetContentRegionAvail().y;
         const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || tracking.HasTracks() || plotTab==1);
@@ -1016,8 +1019,37 @@ private:
             ImGui::EndChild();
         }
         ImGui::EndChild();
+        if(docked)DrawDock(dock);
         ImGui::End();
         DrawRayPlacement();
+    }
+
+    // The side column of pinned exporters, as tabs when both are pinned.
+    static constexpr float DockSplitterWidth=8;
+    void DrawDock(float width) {
+        ImGui::SameLine();
+        ImGui::InvisibleButton("##dock_splitter",{DockSplitterWidth,ImGui::GetContentRegionAvail().y});
+        const bool hovered=ImGui::IsItemHovered(),active=ImGui::IsItemActive();
+        if(hovered || active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        if(active && ImGui::GetIO().MouseDelta.x!=0) dockWidth=width-ImGui::GetIO().MouseDelta.x;
+        if(hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) dockWidth=440;
+        Tip("Drag to resize the pinned panel. Double-click to restore its width.");
+        const ImVec2 min=ImGui::GetItemRectMin(),max=ImGui::GetItemRectMax();
+        const float x=(min.x+max.x)*.5f,center=(min.y+max.y)*.5f;
+        ImGui::GetWindowDrawList()->AddLine({x,center-24},{x,center+24},
+            hovered || active?RayFEM::UI::Palette().accent:ImGui::GetColorU32(ImGuiCol_Border),3);
+        ImGui::SameLine();
+        ImGui::BeginChild("Pinned tools",{0,0},ImGuiChildFlags_Borders);
+        const bool figure=figureExporter.Pinned(),movie=movieExporter.Pinned();
+        if(figure && movie) {
+            if(ImGui::BeginTabBar("Pinned tool tabs")) {
+                if(ImGui::BeginTabItem(ICON_FA_IMAGE " Figure")) {figureExporter.DrawPinned(FigureScene());ImGui::EndTabItem();}
+                if(ImGui::BeginTabItem(ICON_FA_FILM " Movie")) {movieExporter.DrawPinned(MovieHost());ImGui::EndTabItem();}
+                ImGui::EndTabBar();
+            }
+        } else if(figure) figureExporter.DrawPinned(FigureScene());
+        else movieExporter.DrawPinned(MovieHost());
+        ImGui::EndChild();
     }
 
     // While the 2D profile cuts the mesh, the clipping plane follows it; the
@@ -1045,16 +1077,8 @@ private:
             const Vector2 lineViewport{into.texture.width/lineScale,into.texture.height/lineScale};
             RenderScene(into,shown,background,lineViewport,{.reference=false,.selection=false,.guides=guides});
         };
-        if(shown && showSurface) {
-            const float slack=std::max(1e-6f,radius*1e-3f);
-            const Vector3 eye=camera.position;
-            scene.visible=[shown,eye,slack](Vector3 p) {
-                const Vector3 toward=Vector3Subtract(p,eye);
-                const float distance=Vector3Length(toward);
-                const auto hit=shown->picker.Pick({eye,toward});
-                return !hit || hit->distance>=distance-slack;
-            };
-        }
+        scene.visible=SurfaceVisibility(shown,camera.position);
+        if(showAxes)scene.axes=viewAxes;
         if(shown && shown->hasFieldRange && coloring==0) {
             scene.hasColorBar=true;scene.mapping=shown->colorMapping;
             scene.map=static_cast<RayFEM::ColorMap>(colorMap);scene.reverse=reverseColors;scene.field=fieldName;
@@ -1064,6 +1088,77 @@ private:
         scene.themeText={static_cast<unsigned char>(text&0xff),static_cast<unsigned char>((text>>8)&0xff),static_cast<unsigned char>((text>>16)&0xff),255};
         if(shown && shown->frame)scene.frame=shown->frame->metadata.frame_index;
         return scene;
+    }
+
+    // Whether the surface leaves a point visible from eye, for axes that dash
+    // or hide where the mesh covers them; empty when no surface is drawn.
+    RayFEM::UI::Figure::Visibility SurfaceVisibility(const ViewCache* shown,Vector3 eye) const {
+        if(!shown || !showSurface)return {};
+        const float slack=std::max(1e-6f,radius*1e-3f);
+        return [shown,eye,slack](Vector3 p) {
+            const Vector3 toward=Vector3Subtract(p,eye);
+            const float distance=Vector3Length(toward);
+            const auto hit=shown->picker.Pick({eye,toward});
+            return !hit || hit->distance>=distance-slack;
+        };
+    }
+
+    // The view's axes laid out over a picture of size pixels, through view.
+    // scale sizes their lines and text from those on screen.
+    RayFEM::UI::Figure::Overlay AxesOverlay(const ViewCache* shown,const Camera3D& view,Vector2 size,float scale,
+                                            const RayFEM::UI::Figure::Measure& measure) const {
+        namespace Figure=RayFEM::UI::Figure;
+        Figure::Overlay overlay;
+        if(!shown || !shown->vertices)return overlay;
+        const ImU32 text=RayFEM::UI::Palette().text;
+        Figure::Ink ink;
+        ink.color={static_cast<unsigned char>(text&0xff),static_cast<unsigned char>((text>>8)&0xff),static_cast<unsigned char>((text>>16)&0xff),255};
+        ink.hidden=ColorAlpha(ink.color,.45f);
+        ink.font=13*scale;ink.line=1.25f*scale;ink.tick=5*scale;ink.labelGap=3*scale;
+        ink.titleFont=14*scale;ink.titleGap=7*scale;
+        Figure::AddAxes(overlay,viewAxes,shown->bounds,Figure::View(view,size),SurfaceVisibility(shown,view.position),ink,measure);
+        Figure::RemoveOverlaps(overlay,measure);
+        return overlay;
+    }
+
+    // The view's axes over the viewport. The layout is kept until the view,
+    // the surface or the axes change: placing labels tests the surface.
+    void DrawViewAxes(const ViewCache* active,ImVec2 origin,ImVec2 size) {
+        if(!showAxes || !active || !active->vertices)return;
+        ImFont* font=ImGui::GetFont();
+        auto& c=axesCache;
+        const bool same=c.view==active && c.frame==active->frame.get() && c.vertices==active->vertices &&
+            Vector3Equals(c.camera.position,camera.position) && Vector3Equals(c.camera.target,camera.target) &&
+            Vector3Equals(c.camera.up,camera.up) && c.camera.fovy==camera.fovy && c.camera.projection==camera.projection &&
+            c.size.x==size.x && c.size.y==size.y && c.revision==axesRevision && c.surface==showSurface &&
+            c.clip==clip && Vector3Equals(c.slicePoint,slicePoint) && Vector3Equals(c.sliceNormal,sliceNormal);
+        if(!same) {
+            c.overlay=AxesOverlay(active,camera,{size.x,size.y},1,[font](const std::string& text,float px) {
+                return font->CalcTextSizeA(px,FLT_MAX,0,text.c_str()).x;
+            });
+            c.view=active;c.frame=active->frame.get();c.vertices=active->vertices;c.camera=camera;c.size=size;
+            c.revision=axesRevision;c.surface=showSurface;c.clip=clip;c.slicePoint=slicePoint;c.sliceNormal=sliceNormal;
+        }
+        auto* draw=ImGui::GetWindowDrawList();
+        auto color=[](Color k){return IM_COL32(k.r,k.g,k.b,k.a);};
+        auto at=[origin](Vector2 p){return ImVec2{origin.x+p.x,origin.y+p.y};};
+        draw->PushClipRect(origin,{origin.x+size.x,origin.y+size.y},true);
+        for(const auto& f:c.overlay.fills)draw->AddRectFilled(at({f.box.x,f.box.y}),at({f.box.x+f.box.width,f.box.y+f.box.height}),color(f.color));
+        std::vector<ImVec2> points;
+        for(const auto& stroke:c.overlay.strokes) {
+            if(stroke.dashed) {
+                RayFEM::UI::Figure::ForEachDash(stroke,[&](Vector2 a,Vector2 b){draw->AddLine(at(a),at(b),color(stroke.color),stroke.width);});
+                continue;
+            }
+            points.clear();
+            for(const auto& p:stroke.points)points.push_back(at(p));
+            draw->AddPolyline(points.data(),static_cast<int>(points.size()),color(stroke.color),ImDrawFlags_None,stroke.width);
+        }
+        for(const auto& l:c.overlay.labels) {
+            const ImVec2 extent=font->CalcTextSizeA(l.size,FLT_MAX,0,l.plain.c_str());
+            draw->AddText(font,l.size,at({l.at.x-l.align.x*extent.x,l.at.y-l.align.y*extent.y}),color(l.color),l.plain.c_str());
+        }
+        draw->PopClipRect();
     }
 
     // The element viewer for ray endpoints, as its own window over the viewport.
@@ -1189,6 +1284,19 @@ private:
         if(ImGui::Button("Reverse"))spin.rate=-spin.rate;
         RayFEM::UI::Switch("Throw to spin",&spin.throwing);
         Tip("Releasing a drag while the pointer still moves keeps the view turning that way and at that speed, as in GLVis.");
+    }
+
+    // Axes over the view, as figures draw them; movies can include them.
+    void ViewAxesControl() {
+        RayFEM::UI::Switch("Axes",&showAxes);
+        Tip("Rulers or rings with ticks around the mesh, as in exported figures. Movies draw them too unless set otherwise.");
+        if(!showAxes)return;
+        ImGui::Indent(8);
+        ImGui::PushItemWidth(-1);
+        const ViewCache* shown=cache.empty()?nullptr:&cache.back();
+        if(RayFEM::UI::Figure::AxesControls(viewAxes,shown?shown->bounds:BoundingBox{},false))++axesRevision;
+        ImGui::PopItemWidth();
+        ImGui::Unindent(8);
     }
 
     // The client's model axes: drawn, and orienting Home and Fit.
@@ -1356,6 +1464,7 @@ private:
             ImGui::SliderFloat("##element_explosion",&elementExplosion,0,.95f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
             Tip("Open gaps by shrinking each displayed element around its center. Zero restores the mesh. Field values and analysis use the original domain.");
             ReferencePlaneControl();
+            ViewAxesControl();
             ModelAxesControl();
             if(ImGui::TreeNode("Detail")) {
                 RayFEM::UI::Switch("Automatic detail",&automaticDetail);
@@ -1791,9 +1900,10 @@ private:
             const auto* view=ActiveView();
             return view && view->frame==frames[selected] && view->vertices && !surfaceBuilding;
         };
-        host.render=[this](const Camera3D& view,int width,int height,int supersample,std::vector<unsigned char>& rgba) {
-            return RenderMovieFrame(view,width,height,supersample,rgba);
+        host.render=[this](const Camera3D& view,int width,int height,int supersample,bool axes,std::vector<unsigned char>& rgba) {
+            return RenderMovieFrame(view,width,height,supersample,axes,rgba);
         };
+        host.axesShown=[this]{return showAxes;};
         host.spin=[this](Camera3D& view,double radians) {
             const auto [direction,point]=SpinLine(view);
             RayFEM::SpinCamera(view,direction,point,static_cast<float>(radians));
@@ -1804,7 +1914,7 @@ private:
 
     // The surface on screen through view, as top-down RGBA rows. Lines keep
     // the thickness they have on screen relative to the picture.
-    bool RenderMovieFrame(const Camera3D& view,int width,int height,int supersample,std::vector<unsigned char>& rgba) {
+    bool RenderMovieFrame(const Camera3D& view,int width,int height,int supersample,bool axes,std::vector<unsigned char>& rgba) {
         ViewCache* shown=cache.empty()?nullptr:&cache.back();
         if(!shown || !shown->vertices)return false;
         const int w=width*supersample,h=height*supersample;
@@ -1819,20 +1929,27 @@ private:
         RenderScene(movieTarget,shown,RayFEM::UI::Palette().viewport_background,{screen,h*screen/w},
                     {.reference=true,.selection=false,.guides=false});
         camera=saved;
-        // Annotation text, sized to the picture.
-        if(const auto texts=annotations.Texts(view,w,h);!texts.empty()) {
-            const int size=std::max(12,static_cast<int>(h*.032f));
-            if(movieFontSize!=size) {
+        // Axes as on screen, scaled to the picture, then annotation text.
+        const auto overlay=axes?AxesOverlay(shown,view,{static_cast<float>(w),static_cast<float>(h)},w/screen,movieMetrics.Measurer())
+                               :RayFEM::UI::Figure::Overlay{};
+        const auto texts=annotations.Texts(view,w,h);
+        const int size=std::max(12,static_cast<int>(h*.032f));
+        if(!overlay.strokes.empty() || !texts.empty()) {
+            float largest=texts.empty()?0:static_cast<float>(size);
+            for(const auto& l:overlay.labels)largest=std::max(largest,l.size);
+            const int fontSize=std::max(12,static_cast<int>(std::ceil(largest)));
+            if(movieFontSize!=fontSize) {
                 if(movieFont.texture.id && movieFont.texture.id!=GetFontDefault().texture.id)UnloadFont(movieFont);
                 movieFont=GetFontDefault();
                 if(const auto path=RayFEM::UI::Figure::FigureFontPath()) {
                     const auto& codepoints=RayFEM::UI::Figure::FigureCodepoints();
-                    Font loaded=LoadFontEx(path->c_str(),size,const_cast<int*>(codepoints.data()),static_cast<int>(codepoints.size()));
+                    Font loaded=LoadFontEx(path->c_str(),fontSize,const_cast<int*>(codepoints.data()),static_cast<int>(codepoints.size()));
                     if(loaded.texture.id) {movieFont=loaded;SetTextureFilter(movieFont.texture,TEXTURE_FILTER_BILINEAR);}
                 }
-                movieFontSize=size;
+                movieFontSize=fontSize;
             }
             BeginTextureMode(movieTarget);
+            RayFEM::UI::Figure::DrawOverlay(overlay,1,&movieFont);
             for(const auto& t:texts) {
                 const Vector2 at{t.at.x+8.f*supersample,t.at.y-size*.5f};
                 DrawTextEx(movieFont,t.text.c_str(),{at.x+supersample,at.y+supersample},static_cast<float>(size),0,{0,0,0,160});
@@ -2098,6 +2215,7 @@ private:
             }
             if(coloring==2) draw->AddText({origin.x+16,y+3},RayFEM::UI::Palette().muted,"0: interior / cut");
         }
+        DrawViewAxes(active,origin,size);
         DrawModelAxisLabels(active,origin,size);
         annotations.DrawTexts(ImGui::GetWindowDrawList(),origin,size,camera);
         DrawViewportMessages(active,origin,size,orientation);
@@ -2419,6 +2537,18 @@ private:
     bool cameraAdjusted=false;
     bool keepReferencePlane=false;
     bool showModelAxes=true,orientByModelAxis=true;
+    // Axes over the view and the layout last drawn; axesRevision counts changes to their settings.
+    bool showAxes=false;
+    RayFEM::UI::Figure::AxesSettings viewAxes{.style=RayFEM::UI::Figure::AxesStyle::Cartesian};
+    int axesRevision=0;
+    struct {
+        RayFEM::UI::Figure::Overlay overlay;
+        const ViewCache* view=nullptr;const void* frame=nullptr;size_t vertices=0;
+        Camera3D camera{};ImVec2 size{};int revision=-1;bool surface=false,clip=false;Vector3 slicePoint{},sliceNormal{};
+    } axesCache;
+    RayFEM::UI::Figure::TextMetrics movieMetrics;
+    // Width of the side column that pinned exporters share.
+    float dockWidth=440;
     // The view's spin. Axis choices are these, then each model axis.
     enum SpinAxis {SpinScreenUp,SpinScreenRight,SpinWorldX,SpinWorldY,SpinWorldZ,SpinThrown,SpinModel};
     struct {bool active=false;int axis=SpinScreenUp;float rate=30;bool throwing=true;Vector3 thrown{0,1,0};} spin;
