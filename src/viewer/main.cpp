@@ -36,6 +36,7 @@
 #include "render/orientation_cube.hpp"
 #include "render/reference_plane.hpp"
 #include "render/model_axes.hpp"
+#include "render/lighting.hpp"
 #include "interaction/spin.hpp"
 #include "render/rotation_icons.hpp"
 #include "panels/tracking_panel.hpp"
@@ -81,11 +82,30 @@ uniform vec3 planeNormal;
 uniform vec3 planePoint;
 uniform int clipEnabled;
 uniform float overlayDepthBias;
+// Lighting: shading 0 unlit, 1 matte, 2 faceted, 3 glossy; lightDirection
+// points toward the light.
+uniform vec3 lightDirection;
+uniform vec3 eyePosition;
+uniform int shading;
+uniform float ambient;
+uniform float specular;
+uniform float shininess;
 out vec4 finalColor;
 void main() {
     if (clipEnabled != 0 && dot(fragPosition-planePoint,planeNormal)>0.0) discard;
-    float light=0.45+0.55*abs(dot(normalize(fragNormal),normalize(vec3(0.4,0.6,0.7))));
-    finalColor=vec4(fragColor.rgb*colDiffuse.rgb*light,fragColor.a*colDiffuse.a);
+    vec3 color=fragColor.rgb*colDiffuse.rgb;
+    if (shading != 0) {
+        vec3 n=normalize(shading==2?cross(dFdx(fragPosition),dFdy(fragPosition)):fragNormal);
+        vec3 l=normalize(lightDirection);
+        vec3 v=normalize(eyePosition-fragPosition);
+        // Both sides of a surface are lit, so open and cut surfaces read alike.
+        float diffuse=abs(dot(n,l));
+        color*=ambient+(1.0-ambient)*diffuse;
+        if (dot(n,v)<0.0) n=-n;
+        if (specular>0.0 && dot(n,l)>0.0)
+            color+=vec3(specular*pow(max(dot(n,normalize(l+v)),0.0),shininess));
+    }
+    finalColor=vec4(color,fragColor.a*colDiffuse.a);
     // Slope-aware polygon offset keeps line rasterization above the adjacent
     // triangles without revealing hidden edges on the back of the mesh.
     float slope=max(abs(dFdx(gl_FragCoord.z)),abs(dFdy(gl_FragCoord.z)));
@@ -219,6 +239,7 @@ public:
         pointLoc = GetShaderLocation(shader, "planePoint");
         enabledLoc = GetShaderLocation(shader, "clipEnabled");
         depthBiasLoc = GetShaderLocation(shader, "overlayDepthBias");
+        lightingUniforms.Locate(shader);
         const auto home=RayFEM::ReferencePlaneHomeBasis(referenceRotation);
         camera = {Vector3Scale(home.back,12), {0, 0, 0}, home.up, 40, CAMERA_PERSPECTIVE};
         if (!opts.archive.empty()) LoadArchive(opts.archive);
@@ -1043,12 +1064,13 @@ private:
         const bool figure=figureExporter.Pinned(),movie=movieExporter.Pinned();
         if(figure && movie) {
             if(ImGui::BeginTabBar("Pinned tool tabs")) {
-                if(ImGui::BeginTabItem(ICON_FA_IMAGE " Figure")) {figureExporter.DrawPinned(FigureScene());ImGui::EndTabItem();}
-                if(ImGui::BeginTabItem(ICON_FA_FILM " Movie")) {movieExporter.DrawPinned(MovieHost());ImGui::EndTabItem();}
+                const auto select=[](bool focus){return focus?ImGuiTabItemFlags_SetSelected:ImGuiTabItemFlags_None;};
+                if(ImGui::BeginTabItem(ICON_FA_IMAGE " Figure",nullptr,select(figureExporter.TakeFocus()))) {figureExporter.DrawPinned(FigureScene());ImGui::EndTabItem();}
+                if(ImGui::BeginTabItem(ICON_FA_FILM " Movie",nullptr,select(movieExporter.TakeFocus()))) {movieExporter.DrawPinned(MovieHost());ImGui::EndTabItem();}
                 ImGui::EndTabBar();
             }
-        } else if(figure) figureExporter.DrawPinned(FigureScene());
-        else movieExporter.DrawPinned(MovieHost());
+        } else if(figure) {figureExporter.TakeFocus();figureExporter.DrawPinned(FigureScene());}
+        else {movieExporter.TakeFocus();movieExporter.DrawPinned(MovieHost());}
         ImGui::EndChild();
     }
 
@@ -1480,6 +1502,10 @@ private:
             }
             RayFEM::UI::EndSection();
         }
+        if(RayFEM::UI::BeginSection("Lighting",lighting.shading==RayFEM::UI::Shading::Matte?nullptr:RayFEM::UI::ShadingName(lighting.shading),false)) {
+            lighting.Controls(camera);
+            RayFEM::UI::EndSection();
+        }
         if(frame->displacement) {
             char badge[32]="Off";
             if(deform && displacementScale!=1) std::snprintf(badge,sizeof(badge),"×%.2f",displacementScale);
@@ -1675,6 +1701,7 @@ private:
         SetShaderValue(shader,enabledLoc,&enabled,SHADER_UNIFORM_INT);
         float depthBias=(showBoundaries || wireframe || (showContours && coloring==0))?1.5f:0;
         SetShaderValue(shader,depthBiasLoc,&depthBias,SHADER_UNIFORM_FLOAT);
+        lightingUniforms.Apply(shader,lighting,camera);
         BeginTextureMode(into);
         ClearBackground(background);
         const double savedNear=rlGetCullDistanceNear(),savedFar=rlGetCullDistanceFar();
@@ -2585,6 +2612,8 @@ private:
     ImVec2 viewportOrigin{},viewportSize{};
     RayFEM::UI::StreamlineRenderer streamlineRenderer;
     int normalLoc,pointLoc,enabledLoc,depthBiasLoc;
+    RayFEM::UI::Lighting lighting;
+    RayFEM::UI::LightingUniforms lightingUniforms;
     Vector3 sliceNormal={1,0,0},slicePoint={0,0,0};
 };
 

@@ -58,6 +58,8 @@ public:
     bool IsOpen() const { return open; }
     bool Pinned() const { return open && pinned; }
     void Pin(bool on) { pinned = on; }
+    // Whether it was just opened, once: the side column brings its tab forward.
+    bool TakeFocus() { const bool was = focus; focus = false; return was; }
     bool Exporting() const { return job != nullptr; }
     const std::string& Status() const { return status; }
     bool Failed() const { return failed; }
@@ -494,7 +496,7 @@ private:
         }
     }
 
-    bool open = false, focus = false, pinned = false, discovered = false;
+    bool open = false, focus = false, pinned = true, discovered = false;
     AxesMode axes = AxesMode::AsInView;
     Encoder encoder;
     int first = 0, last = -1;

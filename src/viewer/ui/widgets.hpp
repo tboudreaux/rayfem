@@ -238,6 +238,46 @@ inline bool Scrubber(const char* id, int* value, int count, float width, const s
     return changed;
 }
 
+// A disk for a direction seen from the viewer, as x right and y up within
+// the unit circle: the center points at the viewer, the rim to the side.
+// Drag anywhere on it. behind draws the marker hollow, for a direction away
+// from the viewer.
+inline bool DirectionPad(const char* id, float* x, float* y, float size, bool behind = false) {
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, {size, size});
+    const bool hovered = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
+    const ImVec2 center{min.x + size*.5f, min.y + size*.5f};
+    const float radius = size*.5f - 8;
+    bool changed = false;
+    if (active) {
+        const ImVec2 mouse = ImGui::GetMousePos();
+        float px = (mouse.x - center.x)/radius, py = (center.y - mouse.y)/radius;
+        if (const float length = std::sqrt(px*px + py*py); length > 1) { px /= length; py /= length; }
+        if (px != *x || py != *y) { *x = px; *y = py; changed = true; }
+    }
+    auto* draw = ImGui::GetWindowDrawList();
+    const auto& palette = Palette();
+    // A shaded ball lit from the marker, so the pad previews the light.
+    const int rings = 24;
+    for (int i = rings; i > 0; --i) {
+        const float t = float(i)/rings;
+        const ImVec2 at{center.x + *x*radius*(1 - t)*.6f, center.y - *y*radius*(1 - t)*.6f};
+        const unsigned char shade = static_cast<unsigned char>(28 + 150*(1 - t)*(1 - t));
+        draw->AddCircleFilled(at, radius*t, IM_COL32(shade, shade, shade + 6, 255), 48);
+    }
+    draw->AddCircle(center, radius, hovered || active ? palette.accent : ImGui::GetColorU32(ImGuiCol_Border), 48, 1.5f);
+    draw->AddCircle(center, radius*.5f, WithAlpha(palette.muted, 60), 48);
+    draw->AddLine({center.x - radius, center.y}, {center.x + radius, center.y}, WithAlpha(palette.muted, 50));
+    draw->AddLine({center.x, center.y - radius}, {center.x, center.y + radius}, WithAlpha(palette.muted, 50));
+    const ImVec2 marker{center.x + *x*radius, center.y - *y*radius};
+    if (behind) draw->AddCircle(marker, 6, palette.guide, 16, 2);
+    else {
+        draw->AddCircleFilled(marker, 8, WithAlpha(palette.guide, 70), 16);
+        draw->AddCircleFilled(marker, 5, palette.guide, 16);
+    }
+    return changed;
+}
+
 // Tools that float or sit pinned in the viewer's side column (the figure and
 // movie exporters). Floating, a pin button sits in the window's title bar,
 // left of its close button; pinned, a header row gives the title, an unpin

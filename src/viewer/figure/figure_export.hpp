@@ -230,6 +230,8 @@ public:
     bool IsOpen() const { return open; }
     bool Pinned() const { return open && pinned; }
     void Pin(bool on) { pinned = on; }
+    // Whether it was just opened, once: the side column brings its tab forward.
+    bool TakeFocus() { const bool was = focus; focus = false; return was; }
 
     // Scripted use: adjust the options, export, then poll for the result.
     Options& Settings() { return options; }
@@ -309,7 +311,7 @@ private:
     Options options;
     LatexTools tools;
     TextMetrics metrics;
-    bool initialized = false, open = false, focus = false, pinned = false, previewDirty = true;
+    bool initialized = false, open = false, focus = false, pinned = true, previewDirty = true;
     Texture2D preview{};
     Vector2 previewCanvas{};
     double previewAt = -1;
