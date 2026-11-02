@@ -136,48 +136,6 @@ inline bool AxesControls(AxesSettings& axes, BoundingBox bounds, bool allowNone)
     return changed;
 }
 
-// Each drawn piece of a stroke, dashes measured along the whole polyline as
-// in PDF and TikZ.
-template <typename Segment>
-void ForEachDash(const Stroke& stroke, Segment segment) {
-    if (!stroke.dashed) {
-        for (std::size_t i = 1; i < stroke.points.size(); ++i) segment(stroke.points[i - 1], stroke.points[i]);
-        return;
-    }
-    const float on = stroke.width*4 + 2, off = stroke.width*3 + 2;
-    float phase = 0;
-    for (std::size_t i = 1; i < stroke.points.size(); ++i) {
-        const Vector2 a = stroke.points[i - 1], b = stroke.points[i];
-        const float length = Vector2Distance(a, b);
-        float t = 0;
-        while (t < length) {
-            const float cycle = std::fmod(phase + t, on + off);
-            const bool drawing = cycle < on;
-            const float step = std::min(length - t, drawing ? on - cycle : on + off - cycle);
-            if (drawing) segment(Vector2Lerp(a, b, t/length), Vector2Lerp(a, b, (t + step)/length));
-            t += std::max(step, 1e-3f);
-        }
-        phase += length;
-    }
-}
-
-// An overlay into the bound target, scaled by s; text in font when text is set.
-inline void DrawOverlay(const Overlay& overlay, float s, const Font* font) {
-    for (const auto& f : overlay.fills) DrawRectangleRec({f.box.x*s, f.box.y*s, f.box.width*s, f.box.height*s}, f.color);
-    for (const auto& stroke : overlay.strokes) {
-        const float width = std::max(1.f, stroke.width*s);
-        ForEachDash(stroke, [&](Vector2 a, Vector2 b) {
-            DrawLineEx(Vector2Scale(a, s), Vector2Scale(b, s), width, stroke.color);
-            if (stroke.color.a == 255 && width > 2) DrawCircleV(Vector2Scale(b, s), width*.5f, stroke.color);
-        });
-    }
-    if (!font) return;
-    for (const auto& l : overlay.labels) {
-        const Vector2 size = MeasureTextEx(*font, l.plain.c_str(), l.size*s, 0);
-        DrawTextEx(*font, l.plain.c_str(), {std::round(l.at.x*s - l.align.x*size.x), std::round(l.at.y*s - l.align.y*size.y)}, l.size*s, 0, l.color);
-    }
-}
-
 class Exporter {
 public:
     void Open(const Scene& scene) {

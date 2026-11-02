@@ -19,6 +19,7 @@ sources = files(
     'lib/mesh/contours.cpp',
     'lib/profile/sampler.cpp',
     'lib/profile/surface_trace.cpp',
+    'lib/profile/surface_shape.cpp',
     'lib/frame/tracking.cpp',
     'lib/vector/flow.cpp'
 )

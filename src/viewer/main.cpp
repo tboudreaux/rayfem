@@ -41,6 +41,7 @@
 #include "render/rotation_icons.hpp"
 #include "panels/tracking_panel.hpp"
 #include "panels/surface_trace_panel.hpp"
+#include "panels/shape_panel.hpp"
 #include "panels/flow_panel.hpp"
 #include "render/edge_renderer.hpp"
 #include "render/dof_renderer.hpp"
@@ -199,6 +200,7 @@ public:
         flow.SetWorker(&pipeline);
         profiles.SetWorker(&pipeline);
         surfaceTrace.SetWorker(&pipeline);
+        shapePanel.SetWorker(&pipeline);
         rlImGuiSetup(true);
         ImGui::GetIO().IniFilename = nullptr;
         // No keyboard navigation: with it, Space and Enter press the last
@@ -322,6 +324,8 @@ private:
         tracking = TrackingPanel{};
         surfaceTrace = SurfaceTracePanel{};
         surfaceTrace.SetWorker(&pipeline);
+        shapePanel = ShapePanel{};
+        shapePanel.SetWorker(&pipeline);
         flow = FlowPanel{};
         flow.SetWorker(&pipeline);
         elements = ElementPanel{};
@@ -961,6 +965,10 @@ private:
             else rayPlacement.Begin(request->kind);
         }
         surfaceTrace.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
+        if(const auto* axes=ModelAxes())
+            shapePanel.SetModelAxis(std::pair{RayFEM::ModelAxisDirection(axes->front()),RayFEM::ModelAxisOrigin(axes->front())},axes->front().name);
+        else shapePanel.SetModelAxis(std::nullopt,{});
+        shapePanel.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
         flow.UpdateContext(frame,gf,fieldName,RenderSettings(frame));
         tracking.SetExcludedMaterials(excludedMaterials,frames);
         tracking.SetExcludedElements(elements.Hidden(),frame,frames);
@@ -992,12 +1000,14 @@ private:
             });
             profiles.Controls(frame,gf,fieldName,RenderSettings(frame));
             surfaceTrace.Controls(frame,gf,fieldName,RenderSettings(frame));
+            shapePanel.Controls();
             tracking.Controls(frame,fieldName,RenderSettings(frame),frames);
             break;
         default: elements.Controls(frame,gf,fieldName,RenderSettings(frame)); break;
         }
         ImGui::EndChild();
         if(tracking.TakePlotRequest()) {plotTab=1;showPlots=true;}
+        if(shapePanel.TakePlotRequest()) {plotTab=3;showPlots=true;}
         ImGui::PopItemWidth();
         ImGui::EndChild();
         ImGui::SameLine();
@@ -1007,7 +1017,7 @@ private:
         ImGui::BeginChild("Workspace",{docked?-(dock+DockSplitterWidth+2*style.ItemSpacing.x):0,0},ImGuiChildFlags_AlwaysUseWindowPadding);
         DrawToolbar();
         const float available=ImGui::GetContentRegionAvail().y;
-        const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || tracking.HasTracks() || plotTab==1);
+        const bool plotVisible=showPlots && (profiles.Enabled() || surfaceTrace.Enabled() || shapePanel.Enabled() || tracking.HasTracks() || plotTab==1);
         float plotHeight=0;
         if(plotVisible) {
             const float maximum=std::max(140.0f,available-TimelineHeight(ImGui::GetContentRegionAvail().x)-200);
@@ -1034,6 +1044,10 @@ private:
                 if(ImGui::BeginTabItem("Surface",nullptr,plotTab==2?ImGuiTabItemFlags_SetSelected:0)) {
                     if(plotTab==2) plotTab=-1;
                     surfaceTrace.DrawPlot({0,0});ImGui::EndTabItem();
+                }
+                if(ImGui::BeginTabItem("Shape",nullptr,plotTab==3?ImGuiTabItemFlags_SetSelected:0)) {
+                    if(plotTab==3) plotTab=-1;
+                    shapePanel.DrawPlot({0,0});ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();
             }
@@ -1750,6 +1764,7 @@ private:
             if (planeGuide) DrawPlaneGuide();
             profiles.DrawGuide();
             surfaceTrace.DrawGuide(camera);
+            shapePanel.DrawGuide(camera);
         }
         rlEnableBackfaceCulling();
         EndMode3D();
@@ -2115,7 +2130,7 @@ private:
             try {RefreshSelection(*active);}
             catch(const std::exception& e) {error=e.what();}
         }
-        if(active && active->vertices) {profiles.SetBounds(active->bounds,active->frame->mesh);surfaceTrace.SetBounds(active->bounds,active->frame->mesh);}
+        if(active && active->vertices) {profiles.SetBounds(active->bounds,active->frame->mesh);surfaceTrace.SetBounds(active->bounds,active->frame->mesh);shapePanel.SetBounds(active->bounds,active->frame->mesh);}
         if(active) {
             flow.UpdateContext(active->frame,Field(active->frame),fieldName,RenderSettings(active->frame));
             if(active->vertices) flow.SetBounds(active->bounds,active->frame->mesh);
@@ -2529,6 +2544,7 @@ private:
     ProfilePanel profiles;
     TrackingPanel tracking;
     SurfaceTracePanel surfaceTrace;
+    ShapePanel shapePanel;
     FlowPanel flow;
     ElementPanel elements;
     bool elementPress=false,elementPressMoved=false,elementPressAdditive=false;

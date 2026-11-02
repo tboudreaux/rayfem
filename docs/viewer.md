@@ -161,6 +161,12 @@ Tracks retain up to 4,096 scalar samples each, with up to eight visible/configur
 
 `libRayfem/frame/tracking.hpp` exposes `TrackingRequest`, `FrameTracker`, and `ExportTrackingCSV` independently of the UI. Call `bindDof(currentFrame)` before backfilling mixed histories for a picked DOF. Tracks store scalar results and bounded identity metadata, never frame pointers. A track stops after 256 distinct stream/mesh/revision identities; remove it and add another to start fresh.
 
+### Plot settings and export
+
+The gear at the top right of each plot sets its axes: **Linear** or **Log** scale for each (values at or below zero have no place on a log axis and are hidden, with a count), an automatic range or a set one (switching it off starts from the range shown), and labels that replace the plot's own. **Appearance** turns the grid on or off and sets the line width. The gear turns the accent color while an axis is log or set. Settings last for the session, per plot.
+
+**Export** writes the plot as a PNG or a PDF on a white page, with an optional title: a size in inches (3.5, 6.5 and 7 in presets for journal columns), text size in points, and for PNG a resolution. PDF keeps the lines and text as vector graphics. Linear axes tick at round numbers and log axes at whole decades. The raw data stays available through each panel's CSV export.
+
 ## Ray and plane profiles
 
 Use **1D profile** or **2D profile** in the viewport toolbar. The **Analyze** inspector holds the sampling controls, and the **Profile** tab below the mesh shows the result. Detailed coordinates and the replaceable sampling method are under **Sampling settings**. Edit the coordinates or drag the gold handles in the viewport, select a sampling algorithm, then press **Sample profile**. The ray plot preserves gaps outside the mesh; the plane heatmap preserves physical aspect ratio and supports value hover. Profiles sample the currently selected field and view operation, independently of the display clipping plane.
@@ -201,6 +207,21 @@ Each path sample casts an independent ray and selects its nearest forward hit on
 The default **curved** algorithm refines faces to find initial intersections, then solves the ray intersection against the actual curved finite-element face. The **refined** algorithm uses triangle intersections to choose a reference point and evaluates that point on the actual face; its distance from the ray is exported as a residual. Refinement improves search coverage, but highly folded faces can require more refinement and are not guaranteed to have every intersection discovered. Arc length sums chords between consecutive valid hits without bridging gaps. Increasing the sample count improves this approximation.
 
 `libRayfem/profile/surface_trace.hpp` exposes the same mechanism independently of the UI. `MakeMeridianRays` and `MakeAzimuthRays` create angular paths in radians; arbitrary paths can supply their own ordered `SurfaceTraceRay` list with an application-defined parameter. Subclass `SurfaceTraceAlgorithm` and register it with `SurfaceTraceRegistry::registerAlgorithm` to add or replace a selectable algorithm. Samples and CSV include the parameter, arc distance, ray distance, physical and reference positions, field value, validity, intersection residual, and element/face/boundary/material IDs, plus field/frame/algorithm and material-selection metadata. Requests exceeding 250,000 seed triangles, 24 million ray–triangle checks, or 100,000 curved ray–face solves are rejected with a request to reduce refinement or sampling, keeping synchronous work bounded.
+
+## Surface shape
+
+**Analyze → Surface shape** measures the outer surface's radius from a center about a polar axis, for rotating models' oblateness. The axis defaults to the rotation axis the client reports (see [model axes](streaming.md#model-axes)), otherwise world Z; World X, Y or a custom direction are choices. The center is automatic (the mesh's center, moved onto the model's axis when measuring about it) or set.
+
+Rays go out from the center along several meridians (eight by default, 181 colatitudes each from pole to pole) and around the equator (180 rays), and meet the true curved finite-element faces as the curved surface trace does, so the radii do not depend on the drawn tessellation; displacement is included. The panel reports:
+
+- **Equatorial radius**, the mean radius around the equator, and **polar radius**, the mean of the north and south poles (each shown when they differ);
+- **Flattening** f = 1 − R_pol/R_eq and the **axis ratio** R_pol/R_eq;
+- **Volume radius**, the radius of a sphere of the same volume, integrated over the meridians;
+- **Equator ellipticity**, 1 − shortest/longest equatorial radius, when the surface is not axisymmetric.
+
+**Copy** puts these on the clipboard. The view draws the axis between the poles, the first meridian and the equator. The **Shape** plot shows radius against colatitude (the mean over the meridians, with the smallest and largest when there are several), radius divided by the equatorial radius, or **Flattening over time**: each frame measured while the panel is on adds a point, so streaming a run records its flattening history. **Export** saves the profile, or the history, as CSV. **Sampling** sets the counts.
+
+`libRayfem/profile/surface_shape.hpp` offers the same measurement: `SampleSurfaceShape` traces and measures in one call, splitting the rays into batches that fit the surface trace's per-call limits, and `MakeSurfaceShapeRays` with `MeasureSurfaceShape` separate the steps.
 
 ## Materials and boundaries
 

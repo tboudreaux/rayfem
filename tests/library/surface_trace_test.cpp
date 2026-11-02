@@ -1,4 +1,5 @@
 #include "libRayfem/profile/surface_trace.hpp"
+#include "libRayfem/profile/surface_shape.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -165,4 +166,46 @@ void DispatchAndCSV(){
     std::cout<<"PASS extensible dispatch, replaced algorithms, CSV metadata/escaping/gaps\n";
 }
 }
-int main(int argc,char** argv){try{Paths();SphereAndEllipsoid(argc>1?argv[1]:"subprojects/mfem/data");SelectionAndGaps();CurvedFacesAndVectorViews();FoldedFaceAndIntegralDisplacement();DispatchAndCSV();std::cout<<"All surface trace tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Surface trace test failed: "<<e.what()<<'\n';return 1;}}
+// An oblate spheroid and a triaxial ellipsoid, by displacing the exact sphere:
+// radii, flattening and the volume-equivalent radius.
+void Shape(const std::string& data){
+    mfem::Mesh mesh((data+"/ball-nurbs.mesh").c_str(),1,1);auto* nodes=mesh.GetNodes();
+    mfem::FiniteElementSpace scalar_space(&mesh,nodes->FESpace()->FEColl());mfem::GridFunction scalar(&scalar_space);ScalarCoordinates(scalar,*nodes);
+    mfem::FiniteElementSpace displacement_space(&mesh,nodes->FESpace()->FEColl(),3);mfem::GridFunction displacement(&displacement_space);
+    SurfaceTraceRegistry registry;RenderOptions options;options.refinement=3;options.displacement=&displacement;
+    SurfaceShapeOptions shape_options;shape_options.colatitudes=91;shape_options.meridians=24;shape_options.equator=72;
+    const auto rays=MakeSurfaceShapeRays(shape_options);
+    Check(rays.size()==24*91+72,"Meridians then the equator");
+    auto measure=[&](const double (&axes)[3]){
+        for(int i=0;i<displacement_space.GetNDofs();++i)for(int d=0;d<3;++d)
+            displacement[displacement_space.DofToVDof(i,d)]=(axes[d]-1)*(*nodes)[nodes->FESpace()->DofToVDof(i,d)];
+        return MeasureSurfaceShape(shape_options,registry.sample("curved",mesh,scalar,rays,options));
+    };
+    const auto oblate=measure({1.2,1.2,1.0});
+    Check(oblate.hits==oblate.rays,"Every shape ray hits the surface");
+    Near(oblate.equatorial,1.2,1e-9,"Equatorial radius");Near(oblate.polar,1.0,1e-9,"Polar radius");
+    Near(oblate.north,1.0,1e-9,"North pole");Near(oblate.south,1.0,1e-9,"South pole");
+    Near(oblate.flattening,1-1/1.2,1e-9,"Flattening");Near(oblate.axis_ratio,1/1.2,1e-9,"Axis ratio");
+    Near(oblate.equatorial_ellipticity,0,1e-9,"Axisymmetric equator");
+    Near(oblate.volume_radius,std::cbrt(1.2*1.2*1.0),2e-4,"Volume-equivalent radius");
+    Near(oblate.profile[45].mean,1.2,1e-9,"Equator on the profile");Near(oblate.profile[45].max-oblate.profile[45].min,0,1e-9,"Meridians agree");
+    const auto triaxial=measure({1.3,1.1,0.9});
+    Near(triaxial.equatorial_max,1.3,1e-9,"Longest equatorial radius");Near(triaxial.equatorial_min,1.1,1e-9,"Shortest equatorial radius");
+    Near(triaxial.equatorial_ellipticity,1-1.1/1.3,1e-9,"Equatorial ellipticity");Near(triaxial.polar,.9,1e-9,"Triaxial polar radius");
+    Near(triaxial.volume_radius,std::cbrt(1.3*1.1*.9),5e-4,"Triaxial volume radius");
+    std::ostringstream csv;ExportSurfaceShapeCSV(csv,oblate,{"scalar",3,.5});
+    Check(csv.str().find("flattening 0.1666666")!=std::string::npos && csv.str().find("equator_azimuth,")!=std::string::npos,"Shape CSV");
+    // More rays than one trace call allows on this mesh go in batches.
+    SurfaceShapeOptions many=shape_options;many.colatitudes=361;many.meridians=12;many.equator=720;
+    std::vector<SurfaceTraceSample> traced;
+    // Fine seeds make one call too large: 6 patches of 40x40 quads in triangles.
+    RenderOptions fine=options;fine.refinement=40;
+    Check(mesh.GetNBE()==6 && 12*361+720>24000000/(6*40*40*2),"Enough rays to need more than one trace call");
+    const auto batched=SampleSurfaceShape(registry,mesh,scalar,many,fine,&traced);
+    Check(traced.size()==12*361+720 && batched.hits==batched.rays,"Batched rays all hit");
+    Near(batched.flattening,triaxial.flattening,1e-9,"Batches measure the same shape");
+    bool threw=false;try{MeasureSurfaceShape(shape_options,{});}catch(const std::invalid_argument&){threw=true;}Check(threw,"Mismatched samples rejected");
+    std::cout<<"PASS surface shape: radii, flattening and volume radius of oblate and triaxial ellipsoids\n";
+}
+
+int main(int argc,char** argv){try{Paths();SphereAndEllipsoid(argc>1?argv[1]:"subprojects/mfem/data");SelectionAndGaps();CurvedFacesAndVectorViews();FoldedFaceAndIntegralDisplacement();DispatchAndCSV();Shape(argc>1?argv[1]:"subprojects/mfem/data");std::cout<<"All surface trace tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<"Surface trace test failed: "<<e.what()<<'\n';return 1;}}

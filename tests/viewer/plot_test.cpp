@@ -1,5 +1,9 @@
 #include "ui/plot.hpp"
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -101,5 +105,56 @@ void Themes(){
     ImGui::DestroyContext(context);
 }
 
+}void SettingsAndExport(){
+    using namespace RayFEM::UI;
+    // Log axes: whole decades when they span one, even steps otherwise.
+    const auto decades=PlotTicks(-2,3,PlotScale::Log,5);
+    Check(decades.size()==6 && decades.front()==-2 && decades.back()==3,"Decade ticks");
+    Check(PlotAxisLabel(-2,-2,3,PlotScale::Log)=="0.01" && PlotAxisLabel(3,-2,3,PlotScale::Log)=="1000","Decade labels in data units");
+    Check(PlotTicks(.1,.6,PlotScale::Log,4).size()==5,"Less than a decade spaces ticks evenly");
+    Check(std::isnan(PlotAxisValue(0,PlotScale::Log)) && std::isnan(PlotAxisValue(-1,PlotScale::Log)),"No log of nonpositive values");
+    Near(PlotDataValue(PlotAxisValue(42,PlotScale::Log),PlotScale::Log),42,1e-12,"Log round trip");
+    // A log axis hides nonpositive values; a set range replaces the automatic one.
+    const std::vector<PlotPoint> data{{1,0,true},{10,1,true},{100,100,true},{1000,-5,true}};
+    const PlotSeriesView series{"Data",data};
+    PlotSettings settings;settings.x.scale=PlotScale::Log;settings.y.scale=PlotScale::Log;
+    auto t=TransformPlot(std::span(&series,1),settings);
+    Check(t.hidden==2,"Two values have no logarithm");
+    Near(t.range.x_min,0,0,"Log x from the first decade");Near(t.range.x_max,3,0,"Log x to the last");
+    settings.y.automatic=false;settings.y.min=.1;settings.y.max=1000;
+    t=TransformPlot(std::span(&series,1),settings);
+    Near(t.range.y_min,-1,1e-12,"Set log range, low");Near(t.range.y_max,3,1e-12,"Set log range, high");
+    settings.y.min=-1;t=TransformPlot(std::span(&series,1),settings);
+    Check(t.range.y_min!=-1 && std::isfinite(t.range.y_min),"An impossible log range falls back to automatic");
+    // Clipping to the axes.
+    Vector2 a{-10,5},b{20,5};
+    Check(ClipSegment(a,b,{0,0,10,10}),"Crosses the box");Near(a.x,0,1e-5,"Clipped at the left");Near(b.x,10,1e-5,"Clipped at the right");
+    Vector2 c{-5,-5},d{-1,-1};Check(!ClipSegment(c,d,{0,0,10,10}),"Outside segments vanish");
+    // The figure: ticks, labels and the series, then a PDF.
+    settings=PlotSettings{};settings.format=1;
+    std::snprintf(settings.title,sizeof(settings.title),"Test plot");
+    const std::vector<PlotPoint> line{{0,0,true},{1,1,true},{2,4,true}};
+    const PlotSeriesView lines[]={{"Square",line,PlotColor(0)},{"Again",line,PlotColor(1)}};
+    t=TransformPlot(lines,settings);
+    const RayFEM::UI::Figure::TextMetrics metrics;
+    const auto overlay=PlotFigure(t,settings,"x","y",true,{1950,1200},300.f/72,metrics.Measurer());
+    bool title=false,legend=false;for(const auto& l:overlay.labels){title|=l.plain=="Test plot";legend|=l.plain=="Again";}
+    Check(title && legend && overlay.strokes.size()>10,"Figure has a title, a legend, ticks and lines");
+    // A log axis under one decade labels its ticks in data units.
+    const std::vector<PlotPoint> near_one{{0,.9,true},{1,1.2,true},{2,1.5,true}};
+    const PlotSeriesView radius{"Radius",near_one};
+    PlotSettings log_settings;log_settings.y.scale=PlotScale::Log;
+    const auto log_overlay=PlotFigure(TransformPlot(std::span(&radius,1),log_settings),log_settings,"x","y",false,{1950,1200},300.f/72,metrics.Measurer());
+    int numbers=0;
+    for(const auto& l:log_overlay.labels){char* end=nullptr;const double v=std::strtod(l.plain.c_str(),&end);
+        if(end!=l.plain.c_str() && *end==0 && l.align.x==1){++numbers;Check(v>.8 && v<1.6,"Log tick labels are data values");}}
+    Check(numbers>=3,"Log axis has ticks");
+    const auto path=std::filesystem::temp_directory_path()/"rayfem-plot-test.pdf";
+    std::snprintf(settings.path,sizeof(settings.path),"%s",path.string().c_str());
+    ExportPlot(t,settings,"x","y",true);
+    Check(!settings.failed && std::filesystem::file_size(path)>500,"PDF written");
+    std::ifstream pdf(path,std::ios::binary);std::string head(5,'\0');pdf.read(head.data(),5);Check(head=="%PDF-","PDF header");
+    std::filesystem::remove(path);
 }
-int main(){try{FiniteRanges();ConstantAndEmpty();CoordinateRoundTrips();TickLabels();Themes();std::cout<<"Plot helpers passed: finite gaps, shared axes, constant/extreme domains, coordinate roundtrips, tick formatting, and light/dark theme contrast.\n";return 0;}catch(const std::exception& error){std::cerr<<"Plot test failed: "<<error.what()<<'\n';return 1;}}
+
+int main(){try{FiniteRanges();ConstantAndEmpty();CoordinateRoundTrips();TickLabels();Themes();SettingsAndExport();std::cout<<"Plot helpers passed: finite gaps, shared axes, constant/extreme domains, coordinate roundtrips, tick formatting, light/dark theme contrast, log axes, set ranges, clipping and PDF export.\n";return 0;}catch(const std::exception& error){std::cerr<<"Plot test failed: "<<error.what()<<'\n';return 1;}}
