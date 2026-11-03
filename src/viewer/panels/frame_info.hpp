@@ -6,14 +6,18 @@
 #include "extras/IconsFontAwesome6.h"
 #include "imgui.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // What a client says about its frames: captions from its schema, a filter
@@ -51,6 +55,93 @@ inline std::string FrameCaption(const RenderFrame& frame, bool withTags = true) 
     }
     if (withTags) for (const auto& tag : frame.metadata.tags) caption += "  ·  " + tag;
     return caption;
+}
+
+// Text with {name} filled in from a frame, for annotations and movie HUDs.
+// A name is one of the frame's schema values or frame, time, label, tags or
+// caption; {name:.3f} formats a number printf-style (e, f, g; d for whole
+// numbers). Values carry no unit. A value the frame lacks shows as "–";
+// unknown names and malformed fields stay as typed. {{ and }} are braces.
+inline std::vector<std::string> FrameTextBuiltins() { return {"frame", "time", "label", "tags", "caption"}; }
+
+namespace Detail {
+inline bool NumberSpec(std::string_view spec) {
+    size_t i = 0;
+    while (i < spec.size() && std::string_view("-+ #0").find(spec[i]) != std::string_view::npos) ++i;
+    while (i < spec.size() && std::isdigit(static_cast<unsigned char>(spec[i]))) ++i;
+    if (i < spec.size() && spec[i] == '.') {
+        ++i;
+        while (i < spec.size() && std::isdigit(static_cast<unsigned char>(spec[i]))) ++i;
+    }
+    return spec.size() == i + 1 && std::string_view("eEfFgGd").find(spec[i]) != std::string_view::npos && spec.size() < 16;
+}
+inline std::string FormatNumber(double value, std::string_view spec) {
+    char text[64];
+    if (spec.back() == 'd') {
+        const std::string format = "%" + std::string(spec.substr(0, spec.size() - 1)) + "lld";
+        std::snprintf(text, sizeof(text), format.c_str(), static_cast<long long>(std::llround(value)));
+    } else {
+        const std::string format = "%" + std::string(spec);
+        std::snprintf(text, sizeof(text), format.c_str(), value);
+    }
+    return text;
+}
+// One field's text; nullopt keeps the field as typed.
+inline std::optional<std::string> FrameField(const RenderFrame* frame, std::string_view name, std::string_view spec) {
+    std::optional<double> number;
+    std::string text;
+    const auto builtins = FrameTextBuiltins();
+    const bool builtin = std::find(builtins.begin(), builtins.end(), name) != builtins.end();
+    const bool known = builtin || (frame && frame->schema && frame->schema->find(name));
+    if (!known) return std::nullopt;
+    if (!frame) return "–";
+    const auto& m = frame->metadata;
+    if (name == "frame") number = m.frame_index;
+    else if (name == "time") number = m.sim_time;
+    else if (name == "label") text = m.label;
+    else if (name == "tags") { for (const auto& t : m.tags) text += (text.empty() ? "" : ", ") + t; }
+    else if (name == "caption") text = FrameCaption(*frame, false);
+    else if (const Value* value = m.find(name)) {
+        if (const auto* i = std::get_if<int64_t>(value)) number = static_cast<double>(*i);
+        else if (const auto* d = std::get_if<double>(value)) number = *d;
+        else text = std::get<std::string>(*value);
+        if (spec.empty()) return FormatValue(*value);
+    } else return "–";
+    if (!number) return text;
+    if (!spec.empty()) return FormatNumber(*number, spec);
+    char plain[64];
+    std::snprintf(plain, sizeof(plain), "%.6g", *number);
+    return plain;
+}
+} // namespace Detail
+
+inline std::string ExpandFrameText(std::string_view text, const RenderFrame* frame) {
+    std::string out;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if ((c == '{' || c == '}') && i + 1 < text.size() && text[i + 1] == c) { out += c; ++i; continue; }
+        const size_t close = c == '{' ? text.find('}', i + 1) : std::string_view::npos;
+        if (close == std::string_view::npos) { out += c; continue; }
+        std::string_view field = text.substr(i + 1, close - i - 1), spec;
+        if (const size_t colon = field.rfind(':'); colon != std::string_view::npos && Detail::NumberSpec(field.substr(colon + 1))) {
+            spec = field.substr(colon + 1);
+            field = field.substr(0, colon);
+        }
+        if (const auto value = field.empty() ? std::nullopt : Detail::FrameField(frame, field, spec)) {
+            out += *value;
+            i = close;
+        } else out += c;
+    }
+    return out;
+}
+
+// The names ExpandFrameText knows for a frame: its schema's values, then the
+// built-ins.
+inline std::vector<std::string> FrameTextFields(const RenderFrame* frame) {
+    std::vector<std::string> names;
+    if (frame && frame->schema) for (const auto& v : frame->schema->values) names.push_back(v.name);
+    for (auto& name : FrameTextBuiltins()) names.push_back(std::move(name));
+    return names;
 }
 
 // Frames shown on the timeline: any of the chosen tags, and every chosen

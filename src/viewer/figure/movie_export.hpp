@@ -9,6 +9,7 @@
 // Keyframes sit at times in the movie, not at data frames, so a movie of a
 // single frame (one converged model, say) can still move the camera, cut and
 // show annotations freely; with several frames, the frames play underneath.
+// A HUD can show values of the frame in a corner, from {name} fields.
 
 #include "figure/movie.hpp"
 #include "ui/theme.hpp"
@@ -21,6 +22,50 @@
 
 namespace RayFEM::UI::Movie {
 
+// The corner a HUD sits in.
+enum class HudCorner { TopLeft, TopRight, BottomLeft, BottomRight };
+
+// What a movie draws over the scene besides annotation lines: the axes,
+// annotation text at text times its default size, and the HUD's lines with
+// their {name} fields filled from each frame (none when empty).
+struct Overlays {
+    bool axes = false;
+    float text = 1;
+    std::string hud;
+    HudCorner corner = HudCorner::TopLeft;
+};
+
+// Where a HUD goes on a canvas: a box in its corner, inset by a margin, and
+// the top left of each line in it, left aligned so values line up. widths
+// are the lines' widths at size.
+struct HudLayout {
+    Rectangle box{};
+    std::vector<Vector2> lines;
+};
+inline HudLayout LayoutHud(const std::vector<float>& widths, float size, Vector2 canvas, HudCorner corner) {
+    HudLayout layout;
+    if (widths.empty()) return layout;
+    const float pad = size * .55f, step = size * 1.25f, margin = std::min(canvas.x, canvas.y) * .03f;
+    const float w = *std::max_element(widths.begin(), widths.end()) + 2 * pad;
+    const float h = step * (widths.size() - 1) + size + 2 * pad;
+    const bool right = corner == HudCorner::TopRight || corner == HudCorner::BottomRight;
+    const bool bottom = corner == HudCorner::BottomLeft || corner == HudCorner::BottomRight;
+    layout.box = {right ? canvas.x - margin - w : margin, bottom ? canvas.y - margin - h : margin, w, h};
+    for (size_t i = 0; i < widths.size(); ++i) layout.lines.push_back({layout.box.x + pad, layout.box.y + pad + step * i});
+    return layout;
+}
+inline std::vector<std::string> HudLines(const std::string& text) {
+    std::vector<std::string> lines;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = std::min(text.find('\n', start), text.size());
+        lines.push_back(text.substr(start, end - start));
+        start = end + 1;
+    }
+    while (!lines.empty() && lines.back().empty()) lines.pop_back();
+    return lines;
+}
+
 // What the viewer provides. Positions count the frames the timeline shows,
 // from 0; during an export, ready() counts the frames captured when it started.
 struct Host {
@@ -31,10 +76,12 @@ struct Host {
     std::function<Vector2()> viewport;                 // the view's size in pixels
     std::function<int(int, int)> capture;              // keep shown frames first..last for an export; returns how many
     std::function<bool(int)> ready;                    // select a captured frame; true once its surface is built
-    std::function<bool(const Camera3D&, int, int, int, bool, std::vector<unsigned char>&)> render; // camera, width, height, supersample, axes, RGBA
+    std::function<bool(const Camera3D&, int, int, int, const Overlays&, std::vector<unsigned char>&)> render; // camera, width, height, supersample, overlays, RGBA
     std::function<bool()> axesShown;                   // whether the view shows its axes
     std::function<void(Camera3D&, double)> spin;       // turn a camera by radians about the Spin menu's axis
     std::function<void()> release;                     // the export ended: drop the capture
+    std::function<std::vector<std::string>()> fields;  // names a {name} can use, for the frame shown
+    std::function<std::string(const std::string&)> expand; // text with its fields filled from the frame shown
 };
 
 // Whether a movie draws the view's axes: when the view shows them, always or never.
@@ -74,6 +121,20 @@ public:
     void SetLength(double seconds) { totalLength = seconds > 0; if (seconds > 0) totalSeconds = seconds; }
     void SetSpin(bool on, double turns = 1) { includeSpin = on; spinTurns = turns; }
     void SetAxes(AxesMode mode) { axes = mode; }
+    // HUD lines with {name} fields; empty turns it off.
+    void SetHud(const std::string& text, HudCorner corner = HudCorner::TopLeft) {
+        std::snprintf(hud, sizeof(hud), "%s", text.c_str());
+        hudOn = !text.empty(); hudCorner = corner;
+    }
+    void SetTextScale(float scale) { textScale = std::clamp(scale, .25f, 4.f); }
+    // The HUD as the movie will show it, for the view to preview while this
+    // is open; nullopt when it shows none.
+    std::optional<Overlays> PreviewHud() const {
+        if (!open || !hudOn || !hud[0]) return std::nullopt;
+        Overlays o;
+        o.text = textScale; o.hud = hud; o.corner = hudCorner;
+        return o;
+    }
     void Export(const Host& host, const std::string& path) {
         std::snprintf(output, sizeof(output), "%s", path.c_str());
         Start(host);
@@ -93,7 +154,7 @@ public:
                 return;
             }
             std::string error;
-            if (!host.render(scene.camera, j.width, j.height, j.supersample, j.axes, j.rgba)) { Finish(host, "Could not render the frame"); return; }
+            if (!host.render(scene.camera, j.width, j.height, j.supersample, j.overlays, j.rgba)) { Finish(host, "Could not render the frame"); return; }
             if (!j.writer.Write(j.rgba, error)) { Finish(host, error); return; }
             ++j.n;
             j.waiting = GetTime();
@@ -134,6 +195,7 @@ private:
         ImGui::BeginDisabled(job != nullptr);
         Frames(host, count);
         Timeline(host, count);
+        Overlay(host);
         Output(host);
         ImGui::EndDisabled();
         ImGui::EndChild();
@@ -150,7 +212,7 @@ private:
     };
     struct Job : Plan {
         int n = 0, total = 0, width = 0, height = 0, supersample = 1;
-        bool axes = false;
+        Overlays overlays;
         double waiting = 0;
         Writer writer;
         std::vector<unsigned char> rgba;
@@ -386,6 +448,51 @@ private:
         draw->AddPolyline(points, count, Palette().accent, 0, 1.6f);
     }
 
+    // What shows over the scene: annotation text and the HUD.
+    void Overlay(const Host& host) {
+        if (!BeginSection("Text and HUD")) return;
+        FieldLabel("Text size");
+        ImGui::SetNextItemWidth(-1);
+        float percent = textScale * 100;
+        if (ImGui::SliderFloat("##movie_text", &percent, 25, 400, "%.0f%%", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic))
+            textScale = percent / 100;
+        Tip("Annotation and HUD text, relative to the default of about 3% of the movie's height.");
+        if (ImGui::Checkbox("Show a HUD", &hudOn) && hudOn && !hud[0]) std::snprintf(hud, sizeof(hud), "{caption}");
+        Tip("Values of each frame in a corner of the movie, such as its time or a quantity of the schema. "
+            "The view previews it while this window is open.");
+        if (!hudOn) { EndSection(); return; }
+        ImGui::SameLine();
+        static const char* corners[] = {"Top left", "Top right", "Bottom left", "Bottom right"};
+        int corner = static_cast<int>(hudCorner);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("##hud_corner", &corner, corners, 4)) hudCorner = static_cast<HudCorner>(corner);
+        ImGui::InputTextMultiline("##hud", hud, sizeof(hud), {-1, ImGui::GetTextLineHeight() * 4.5f});
+        Tip("One line per row. {name} shows a value of the frame: {Omega} as sent, {Omega:.4f} or {residual:.2e} "
+            "formatted; also {frame}, {time}, {label}, {tags} and {caption}.");
+        if (ImGui::Button(ICON_FA_PLUS "  Field")) ImGui::OpenPopup("hud_fields");
+        Tip("Add a line showing a value of the frame");
+        if (ImGui::BeginPopup("hud_fields")) {
+            const auto names = host.fields ? host.fields() : std::vector<std::string>{};
+            ImGui::TextDisabled("Add a line");
+            for (const auto& name : names) if (ImGui::MenuItem(name.c_str())) {
+                std::string text = hud;
+                if (!text.empty() && text.back() != '\n') text += '\n';
+                text += name == "caption" ? "{caption}" : name + " = {" + name + "}";
+                std::snprintf(hud, sizeof(hud), "%s", text.c_str());
+            }
+            if (names.empty()) ImGui::TextDisabled("No frame shown yet");
+            ImGui::EndPopup();
+        }
+        if (host.expand && hud[0]) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("Shown for this frame:");
+            ImGui::Indent();
+            ImGui::TextDisabled("%s", host.expand(hud).c_str());
+            ImGui::Unindent();
+        }
+        EndSection();
+    }
+
     void Output(const Host& host) {
         if (!BeginSection("Output")) return;
         FieldLabel("Size");
@@ -464,7 +571,9 @@ private:
         next->keys = keys; next->start = host.state();
         next->spin = includeSpin; next->turns = spinTurns; next->path = output;
         next->restoreFrame = restore;
-        next->axes = axes == AxesMode::On || (axes == AxesMode::AsInView && host.axesShown && host.axesShown());
+        next->overlays.axes = axes == AxesMode::On || (axes == AxesMode::AsInView && host.axesShown && host.axesShown());
+        next->overlays.text = textScale;
+        if (hudOn) { next->overlays.hud = hud; next->overlays.corner = hudCorner; }
         next->waiting = GetTime();
         next->rgba.resize(static_cast<size_t>(next->width) * next->height * 4);
         spinner = host.spin;
@@ -498,6 +607,10 @@ private:
 
     bool open = false, focus = false, pinned = true, discovered = false;
     AxesMode axes = AxesMode::AsInView;
+    bool hudOn = false;
+    char hud[1024] = "";
+    HudCorner hudCorner = HudCorner::TopLeft;
+    float textScale = 1;
     Encoder encoder;
     int first = 0, last = -1;
     double fps = 30, secondsPerFrame = .2;

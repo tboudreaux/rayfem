@@ -3,7 +3,8 @@
 // Lines and labels placed on the model, for figures of the view and movies.
 // A line joins two points picked on the surface; a label is text at one.
 // They live in world coordinates, so they stay put across frames; movie
-// keyframes record which are visible.
+// keyframes record which are visible. Text may hold {name} fields that fill
+// in from the frame shown (ExpandFrameText).
 
 #include "ui/theme.hpp"
 #include "ui/widgets.hpp"
@@ -14,11 +15,15 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace RayFEM::UI {
+
+// Text as shown: fields filled in from the frame. Empty shows text as typed.
+using TextExpander = std::function<std::string(const std::string&)>;
 
 struct Annotation {
     enum class Kind { Line, Label };
@@ -64,14 +69,19 @@ public:
         return false;
     }
 
-    // Visible annotations by id, for movie keyframes.
+    // Visible annotations by id, for movie keyframes, and the first id a
+    // keyframe recorded now does not know about.
     std::vector<uint32_t> Visible() const {
         std::vector<uint32_t> ids;
         for (const auto& item : items_) if (item.visible) ids.push_back(item.id);
         return ids;
     }
-    void SetVisible(const std::vector<uint32_t>& ids) {
-        for (auto& item : items_) item.visible = std::find(ids.begin(), ids.end(), item.id) != ids.end();
+    uint32_t NextId() const { return next_; }
+    // Shows ids and hides the rest of those made before until; later ones
+    // keep their visibility.
+    void SetVisible(const std::vector<uint32_t>& ids, uint32_t until = UINT32_MAX) {
+        for (auto& item : items_)
+            if (item.id < until) item.visible = std::find(ids.begin(), ids.end(), item.id) != ids.end();
     }
 
     // Lines as rods and label points as dots, in a 3D pass; extent sets their
@@ -96,7 +106,7 @@ public:
     // Where each visible annotation's text goes on screen: labels beside
     // their point, line text beside the middle.
     struct Text { std::string text; Vector2 at; Color color; };
-    std::vector<Text> Texts(const Camera3D& camera, int width, int height) const {
+    std::vector<Text> Texts(const Camera3D& camera, int width, int height, const TextExpander& expand = {}) const {
         std::vector<Text> texts;
         const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
         for (const auto& item : items_) {
@@ -105,12 +115,13 @@ public:
             if (Vector3DotProduct(Vector3Subtract(at, camera.position), forward) <= 0) continue;
             const Vector2 p = GetWorldToScreenEx(at, camera, width, height);
             if (p.x < 0 || p.y < 0 || p.x > width || p.y > height) continue;
-            texts.push_back({item.text, p, item.color});
+            std::string text = expand ? expand(item.text) : item.text;
+            if (!text.empty()) texts.push_back({std::move(text), p, item.color});
         }
         return texts;
     }
-    void DrawTexts(ImDrawList* draw, ImVec2 origin, ImVec2 size, const Camera3D& camera) const {
-        for (const auto& t : Texts(camera, int(size.x), int(size.y))) {
+    void DrawTexts(ImDrawList* draw, ImVec2 origin, ImVec2 size, const Camera3D& camera, const TextExpander& expand = {}) const {
+        for (const auto& t : Texts(camera, int(size.x), int(size.y), expand)) {
             const ImU32 color = IM_COL32(t.color.r, t.color.g, t.color.b, 255);
             const ImVec2 at{origin.x + t.at.x + 8, origin.y + t.at.y - ImGui::GetTextLineHeight() * .5f};
             draw->AddText({at.x + 1, at.y + 1}, IM_COL32(0, 0, 0, 160), t.text.c_str());
@@ -118,8 +129,9 @@ public:
         }
     }
 
-    // The list: add, edit, show and remove.
-    void Controls() {
+    // The list: add, edit, show and remove. fields are the names a {name}
+    // in the text can use; expand previews the text for the frame shown.
+    void Controls(const std::vector<std::string>& fields = {}, const TextExpander& expand = {}) {
         if (tool_ != Tool::None) {
             ImGui::TextColored(ThemeText(Palette().guide), tool_ == Tool::Line
                 ? (pending_ ? "Click the line's second point on the surface" : "Click the line's first point on the surface")
@@ -146,12 +158,28 @@ public:
             ImGui::SameLine();
             char text[256];
             std::snprintf(text, sizeof(text), "%s", item.text.c_str());
-            ImGui::SetNextItemWidth(std::max(60.f, ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight() * 2 - 8));
+            const float buttons = ImGui::GetFrameHeight() * 2 + ImGui::CalcTextSize("{}").x + ImGui::GetStyle().FramePadding.x * 2;
+            ImGui::SetNextItemWidth(std::max(60.f, ImGui::GetContentRegionAvail().x - buttons - 12));
             if (ImGui::InputTextWithHint("##text", item.kind == Annotation::Kind::Line ? "Line (optional text)" : "Label text",
                                          text, sizeof(text))) item.text = text;
+            Tip("{name} shows a value of the frame shown, such as {time} or {Omega:.3f}");
+            ImGui::SameLine();
+            if (ImGui::Button("{}")) ImGui::OpenPopup("fields");
+            Tip("Insert a value of the frame shown; it updates as the frame changes");
+            if (ImGui::BeginPopup("fields")) {
+                ImGui::TextDisabled("Insert a field");
+                for (const auto& name : fields)
+                    if (ImGui::MenuItem(name.c_str())) item.text += (item.text.empty() || item.text.back() == ' ' ? "{" : " {") + name + "}";
+                if (fields.empty()) ImGui::TextDisabled("No frame shown yet");
+                ImGui::EndPopup();
+            }
             ImGui::SameLine();
             if (ImGui::Button(ICON_FA_TRASH_CAN)) remove = static_cast<int>(i);
             Tip("Remove");
+            if (expand && item.text.find('{') != std::string::npos) {
+                const std::string shown = expand(item.text);
+                if (shown != item.text) ImGui::TextDisabled("  %s", shown.c_str());
+            }
             if (ImGui::TreeNode(item.kind == Annotation::Kind::Line ? "Ends" : "Point")) {
                 ImGui::DragFloat3("##a", &item.a.x, .001f, 0, 0, "%.4g");
                 if (item.kind == Annotation::Kind::Line) ImGui::DragFloat3("##b", &item.b.x, .001f, 0, 0, "%.4g");

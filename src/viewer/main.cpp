@@ -1823,7 +1823,7 @@ private:
         ImGui::SetNextWindowPos({viewportOrigin.x+16,viewportOrigin.y+16},ImGuiCond_Appearing);
         if(annotationsFocus){ImGui::SetNextWindowFocus();annotationsFocus=false;}
         if(ImGui::Begin(ICON_FA_PEN "  Annotations###annotations",&annotationsOpen,ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoCollapse))
-            annotations.Controls();
+            annotations.Controls(RayFEM::UI::FrameTextFields(ShownFrame()),FrameTextExpander());
         ImGui::End();
     }
 
@@ -1914,7 +1914,7 @@ private:
             return position>=0 && position<static_cast<int>(shown.size())?RayFEM::UI::FrameCaption(*frames[shown[position]]):std::string();
         };
         host.state=[this]{
-            return RayFEM::UI::Movie::SceneState{camera,clip,slicePoint,sliceNormal,clipMode,annotations.Visible()};
+            return RayFEM::UI::Movie::SceneState{camera,clip,slicePoint,sliceNormal,clipMode,annotations.Visible(),annotations.NextId()};
         };
         host.apply=[this](int position,const RayFEM::UI::Movie::SceneState& scene) {
             if(position>=0) {
@@ -1925,7 +1925,7 @@ private:
             cameraTransition.active=false;spin.active=false;
             camera=scene.camera;cameraAdjusted=true;
             clip=scene.clip;slicePoint=scene.clip_point;sliceNormal=scene.clip_normal;clipMode=scene.clip_mode;
-            annotations.SetVisible(scene.annotations);
+            annotations.SetVisible(scene.annotations,scene.annotations_until);
         };
         host.viewport=[this]{return Vector2{std::max(16.f,viewportSize.x),std::max(16.f,viewportSize.y)};};
         host.capture=[this](int first,int last) {
@@ -1942,9 +1942,12 @@ private:
             const auto* view=ActiveView();
             return view && view->frame==frames[selected] && view->vertices && !surfaceBuilding;
         };
-        host.render=[this](const Camera3D& view,int width,int height,int supersample,bool axes,std::vector<unsigned char>& rgba) {
-            return RenderMovieFrame(view,width,height,supersample,axes,rgba);
+        host.render=[this](const Camera3D& view,int width,int height,int supersample,const RayFEM::UI::Movie::Overlays& overlays,
+                           std::vector<unsigned char>& rgba) {
+            return RenderMovieFrame(view,width,height,supersample,overlays,rgba);
         };
+        host.fields=[this]{return RayFEM::UI::FrameTextFields(ShownFrame());};
+        host.expand=FrameTextExpander();
         host.axesShown=[this]{return showAxes;};
         host.spin=[this](Camera3D& view,double radians) {
             const auto [direction,point]=SpinLine(view);
@@ -1954,9 +1957,38 @@ private:
         return host;
     }
 
+    // The frame the view shows, which annotation and HUD fields read.
+    const RayFEM::RenderFrame* ShownFrame() const {
+        return cache.empty() || !cache.back().frame?nullptr:cache.back().frame.get();
+    }
+    RayFEM::UI::TextExpander FrameTextExpander() const {
+        return [this](const std::string& text){return RayFEM::UI::ExpandFrameText(text,ShownFrame());};
+    }
+
+    // The movie's HUD over the viewport while the Movie window is open, at
+    // the size it has in the movie relative to the picture's height.
+    void DrawHudPreview(const RayFEM::UI::Movie::Overlays& hud,ImVec2 origin,ImVec2 size) const {
+        namespace Movie=RayFEM::UI::Movie;
+        const auto lines=Movie::HudLines(RayFEM::UI::ExpandFrameText(hud.hud,ShownFrame()));
+        if(lines.empty())return;
+        ImFont* font=ImGui::GetFont();
+        const float px=std::max(8.f,size.y*.032f*hud.text);
+        std::vector<float> widths;
+        for(const auto& line:lines)widths.push_back(font->CalcTextSizeA(px,FLT_MAX,0,line.c_str()).x);
+        const auto layout=Movie::LayoutHud(widths,px,{size.x,size.y},hud.corner);
+        ImDrawList* draw=ImGui::GetWindowDrawList();
+        const Color back=RayFEM::UI::Palette().viewport_background;
+        draw->AddRectFilled({origin.x+layout.box.x,origin.y+layout.box.y},
+                            {origin.x+layout.box.x+layout.box.width,origin.y+layout.box.y+layout.box.height},
+                            IM_COL32(back.r,back.g,back.b,185),px*.3f);
+        for(size_t i=0;i<lines.size();++i)
+            draw->AddText(font,px,{origin.x+layout.lines[i].x,origin.y+layout.lines[i].y},RayFEM::UI::Palette().text,lines[i].c_str());
+    }
+
     // The surface on screen through view, as top-down RGBA rows. Lines keep
     // the thickness they have on screen relative to the picture.
-    bool RenderMovieFrame(const Camera3D& view,int width,int height,int supersample,bool axes,std::vector<unsigned char>& rgba) {
+    bool RenderMovieFrame(const Camera3D& view,int width,int height,int supersample,const RayFEM::UI::Movie::Overlays& extra,
+                          std::vector<unsigned char>& rgba) {
         ViewCache* shown=cache.empty()?nullptr:&cache.back();
         if(!shown || !shown->vertices)return false;
         const int w=width*supersample,h=height*supersample;
@@ -1971,13 +2003,15 @@ private:
         RenderScene(movieTarget,shown,RayFEM::UI::Palette().viewport_background,{screen,h*screen/w},
                     {.reference=true,.selection=false,.guides=false});
         camera=saved;
-        // Axes as on screen, scaled to the picture, then annotation text.
-        const auto overlay=axes?AxesOverlay(shown,view,{static_cast<float>(w),static_cast<float>(h)},w/screen,movieMetrics.Measurer())
-                               :RayFEM::UI::Figure::Overlay{};
-        const auto texts=annotations.Texts(view,w,h);
-        const int size=std::max(12,static_cast<int>(h*.032f));
-        if(!overlay.strokes.empty() || !texts.empty()) {
-            float largest=texts.empty()?0:static_cast<float>(size);
+        // Axes as on screen, scaled to the picture, then annotation text and
+        // the HUD, their fields filled from the frame shown.
+        const auto overlay=extra.axes?AxesOverlay(shown,view,{static_cast<float>(w),static_cast<float>(h)},w/screen,movieMetrics.Measurer())
+                                     :RayFEM::UI::Figure::Overlay{};
+        const auto texts=annotations.Texts(view,w,h,FrameTextExpander());
+        const auto hud=RayFEM::UI::Movie::HudLines(RayFEM::UI::ExpandFrameText(extra.hud,shown->frame.get()));
+        const int size=std::max(8,static_cast<int>(h*.032f*extra.text));
+        if(!overlay.strokes.empty() || !texts.empty() || !hud.empty()) {
+            float largest=texts.empty() && hud.empty()?0:static_cast<float>(size);
             for(const auto& l:overlay.labels)largest=std::max(largest,l.size);
             const int fontSize=std::max(12,static_cast<int>(std::ceil(largest)));
             if(movieFontSize!=fontSize) {
@@ -1996,6 +2030,16 @@ private:
                 const Vector2 at{t.at.x+8.f*supersample,t.at.y-size*.5f};
                 DrawTextEx(movieFont,t.text.c_str(),{at.x+supersample,at.y+supersample},static_cast<float>(size),0,{0,0,0,160});
                 DrawTextEx(movieFont,t.text.c_str(),at,static_cast<float>(size),0,t.color);
+            }
+            if(!hud.empty()) {
+                std::vector<float> widths;
+                for(const auto& line:hud)widths.push_back(MeasureTextEx(movieFont,line.c_str(),static_cast<float>(size),0).x);
+                const auto layout=RayFEM::UI::Movie::LayoutHud(widths,static_cast<float>(size),{static_cast<float>(w),static_cast<float>(h)},extra.corner);
+                const ImU32 ink=RayFEM::UI::Palette().text;
+                DrawRectangleRounded(layout.box,.3f*size/std::max(1.f,std::min(layout.box.width,layout.box.height)),8,
+                                     ColorAlpha(RayFEM::UI::Palette().viewport_background,185/255.f));
+                const Color color{static_cast<unsigned char>(ink&0xff),static_cast<unsigned char>((ink>>8)&0xff),static_cast<unsigned char>((ink>>16)&0xff),255};
+                for(size_t i=0;i<hud.size();++i)DrawTextEx(movieFont,hud[i].c_str(),layout.lines[i],static_cast<float>(size),0,color);
             }
             EndTextureMode();
         }
@@ -2259,7 +2303,8 @@ private:
         }
         DrawViewAxes(active,origin,size);
         DrawModelAxisLabels(active,origin,size);
-        annotations.DrawTexts(ImGui::GetWindowDrawList(),origin,size,camera);
+        annotations.DrawTexts(ImGui::GetWindowDrawList(),origin,size,camera,FrameTextExpander());
+        if(const auto hud=movieExporter.PreviewHud())DrawHudPreview(*hud,origin,size);
         DrawViewportMessages(active,origin,size,orientation);
         RayFEM::UI::DrawOrientationCube(camera,orientation.cube,mouse,hovered && !existingDrag,cubePointer.dragging);
         RayFEM::UI::DrawCameraRotationArrows(orientation,mouse,hovered && !existingDrag,rotationIcons);

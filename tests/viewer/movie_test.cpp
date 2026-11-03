@@ -1,4 +1,7 @@
 #include "figure/movie.hpp"
+#include "figure/movie_export.hpp"
+#include "panels/annotations.hpp"
+#include "panels/frame_info.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -177,6 +180,65 @@ void Encode() {
     std::filesystem::remove_all(directory);
     std::cout << "encoded with " << encoder.codec << '\n';
 }
+// Annotation and HUD text filled in from a frame's schema values.
+void FrameText() {
+    using RayFEM::UI::ExpandFrameText;
+    RayFEM::RenderFrame frame;
+    auto schema = std::make_shared<RayFEM::FrameSchema>();
+    schema->values = {{"Newton step", RayFEM::ValueType::Integer, true, "", ""},
+                      {"Omega", RayFEM::ValueType::Real, false, "", ""},
+                      {"residual", RayFEM::ValueType::Real, false, "", ""},
+                      {"note", RayFEM::ValueType::Text, false, "", ""}};
+    schema->primary = "Newton step";
+    frame.schema = schema;
+    frame.metadata.frame_index = 7; frame.metadata.sim_time = 0.25;
+    frame.metadata.values = {{"Newton step", std::int64_t{12}}, {"Omega", 0.70123456}, {"note", std::string("seeded")}};
+    frame.metadata.tags = {"accepted", "converged"};
+    Check(ExpandFrameText("Omega = {Omega}", &frame) == "Omega = 0.701235", "A value shows as sent");
+    Check(ExpandFrameText("{Omega:.3f} / {Omega:.2e}", &frame) == "0.701 / 7.01e-01", "Formats apply to numbers");
+    Check(ExpandFrameText("step {Newton step:d}, {Newton step:.1f}", &frame) == "step 12, 12.0", "Names with spaces; d rounds");
+    Check(ExpandFrameText("{note}: {residual}", &frame) == "seeded: –", "Text values, and a value the frame lacks");
+    Check(ExpandFrameText("{frame} {time} {tags}", &frame) == "7 0.25 accepted, converged", "Built-in fields");
+    Check(ExpandFrameText("{caption}", &frame) == "Newton step 12  ·  t 0.25", "The frame's caption");
+    Check(ExpandFrameText("{unknown} {Omega:bad} {{Omega}} {", &frame) == "{unknown} {Omega:bad} {Omega} {",
+          "Unknown and malformed fields stay as typed; doubled braces are braces");
+    Check(ExpandFrameText("t = {time}", nullptr) == "t = –", "No frame: built-ins show as missing");
+    const auto fields = RayFEM::UI::FrameTextFields(&frame);
+    Check(fields.size() == 9 && fields.front() == "Newton step" && fields.back() == "caption", "Schema values, then built-ins");
+
+    RayFEM::UI::Annotations annotations;
+    annotations.Items().push_back({1, RayFEM::UI::Annotation::Kind::Label, {0, 0, 0}, {0, 0, 0}, "Omega {Omega:.2f}"});
+    const Camera3D camera{{0, 0, 5}, {0, 0, 0}, {0, 1, 0}, 40, CAMERA_PERSPECTIVE};
+    const auto texts = annotations.Texts(camera, 200, 100, [&](const std::string& t) { return ExpandFrameText(t, &frame); });
+    Check(texts.size() == 1 && texts[0].text == "Omega 0.70", "Annotation text fills in its fields");
+}
+
+// A keyframe hides only annotations that existed when it was recorded.
+void LaterAnnotations() {
+    RayFEM::UI::Annotations annotations;
+    for (uint32_t id : {1u, 2u, 3u}) annotations.Items().push_back({id, RayFEM::UI::Annotation::Kind::Label});
+    annotations.SetVisible({1}, 3);
+    Check(annotations.Items()[0].visible && !annotations.Items()[1].visible && annotations.Items()[2].visible,
+          "Ids from the horizon on keep their visibility");
+    annotations.SetVisible({1});
+    Check(!annotations.Items()[2].visible, "Without a horizon every annotation follows the list");
+    SceneState state;
+    state.annotations = {1}; state.annotations_until = 2;
+    const Keyframe key = KeyframeFrom(state, 0);
+    Check(key.annotations_until == 2 && StateAt({key}, 1)->annotations_until == 2, "Keyframes carry the horizon");
+}
+
+// HUD lines in a corner, inset from its edges.
+void HudBoxes() {
+    Check(HudLines("a\nbb\n\n").size() == 2 && HudLines("").empty() && HudLines("x\n\ny").size() == 3, "Lines split; trailing blanks drop");
+    const auto left = LayoutHud({40, 80}, 10, {400, 200}, HudCorner::TopLeft);
+    Check(left.box.x == 6 && left.box.y == 6 && left.box.width == 91 && left.lines.size() == 2, "Top left is inset by 3% of the short side");
+    Check(left.lines[0].x == left.lines[1].x && left.lines[1].y - left.lines[0].y == 12.5f, "Lines step by 1.25 sizes");
+    const auto right = LayoutHud({40, 80}, 10, {400, 200}, HudCorner::BottomRight);
+    Check(right.box.x + right.box.width == 394 && right.box.y + right.box.height == 194, "Bottom right is inset too");
+    Check(right.lines[0].x == right.lines[1].x && right.lines[0].x == right.box.x + 5.5f, "Lines align left in any corner");
+    Check(LayoutHud({}, 10, {400, 200}, HudCorner::TopLeft).lines.empty(), "No lines, no box");
+}
 } // namespace
 
 int main() {
@@ -185,6 +247,9 @@ int main() {
         SceneKeyframes();
         PerKeyframeEasing();
         MovieTiming();
+        FrameText();
+        LaterAnnotations();
+        HudBoxes();
         Encode();
         std::cout << "movie passed\n";
         return 0;

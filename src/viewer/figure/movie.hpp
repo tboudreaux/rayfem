@@ -24,12 +24,15 @@ using Figure::ReadText;
 using Figure::ShellQuote;
 
 // What a keyframe records: the camera, the cut, and which annotations show.
+// Annotations made after it (ids from annotations_until on) keep their own
+// visibility, so adding one never hides it in a movie keyed before.
 struct SceneState {
     Camera3D camera{};
     bool clip = false;
     Vector3 clip_point{}, clip_normal{1, 0, 0};
     int clip_mode = 0;
     std::vector<uint32_t> annotations;
+    uint32_t annotations_until = UINT32_MAX;
 };
 
 // How the scene moves from a keyframe to the next one. Constant speed, ease
@@ -87,6 +90,7 @@ struct Keyframe {
     Vector3 clip_point{}, clip_normal{1, 0, 0};
     int clip_mode = 0;
     std::vector<uint32_t> annotations;
+    uint32_t annotations_until = UINT32_MAX;
     Easing easing = Easing::EaseInOut;
 };
 
@@ -94,7 +98,7 @@ inline Keyframe KeyframeFrom(const SceneState& state, double time) {
     const auto& camera = state.camera;
     return {time, camera.target, Vector3Distance(camera.position, camera.target),
             CameraBasisQuaternion(CameraBasis(camera)), camera.fovy,
-            state.clip, state.clip_point, state.clip_normal, state.clip_mode, state.annotations};
+            state.clip, state.clip_point, state.clip_normal, state.clip_mode, state.annotations, state.annotations_until};
 }
 inline Keyframe KeyframeFrom(const Camera3D& camera, double time) { return KeyframeFrom(SceneState{camera}, time); }
 
@@ -104,7 +108,8 @@ inline Camera3D CameraFrom(const Keyframe& key, int projection = CAMERA_PERSPECT
     return {Vector3Add(key.target, Vector3Scale(back, key.distance)), key.target, up, key.fovy, projection};
 }
 inline SceneState StateFrom(const Keyframe& key, int projection = CAMERA_PERSPECTIVE) {
-    return {CameraFrom(key, projection), key.clip, key.clip_point, key.clip_normal, key.clip_mode, key.annotations};
+    return {CameraFrom(key, projection), key.clip, key.clip_point, key.clip_normal, key.clip_mode, key.annotations,
+            key.annotations_until};
 }
 
 // The scene at time along the keyframes (sorted by time). Before the first
