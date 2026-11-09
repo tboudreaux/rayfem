@@ -55,7 +55,12 @@ czmq_subproject = cmake.subproject('czmq', options: czmq_opts)
 czmq_dep = czmq_subproject.dependency('czmq')
 dependencies += czmq_dep
 czmq_version_parts = []
-czmq_header = fs.read(meson.project_source_root() / 'subprojects/czmq/include/czmq_library.h')
+# As a subproject, RayFEM's own dependencies are promoted to the parent project's subprojects directory.
+czmq_source = meson.project_source_root() / 'subprojects/czmq'
+if not fs.exists(czmq_source / 'include/czmq_library.h')
+    czmq_source = meson.global_source_root() / 'subprojects/czmq'
+endif
+czmq_header = fs.read(czmq_source / 'include/czmq_library.h')
 foreach part : ['MAJOR', 'MINOR', 'PATCH']
     czmq_version_parts += czmq_header.split('#define CZMQ_VERSION_' + part + ' ')[1].split('\n')[0].strip()
 endforeach

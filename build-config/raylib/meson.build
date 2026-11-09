@@ -17,7 +17,12 @@ endif
 raylib_subproject = cmake.subproject('raylib', options: raylib_opts)
 raylib_dep = raylib_subproject.dependency('raylib')
 dependencies += raylib_dep
-raylib_header = fs.read(meson.project_source_root() / 'subprojects/raylib/src/raylib.h')
+# As a subproject, RayFEM's own dependencies are promoted to the parent project's subprojects directory.
+raylib_source = meson.project_source_root() / 'subprojects/raylib'
+if not fs.exists(raylib_source / 'src/raylib.h')
+    raylib_source = meson.global_source_root() / 'subprojects/raylib'
+endif
+raylib_header = fs.read(raylib_source / 'src/raylib.h')
 raylib_version = raylib_header.split('#define RAYLIB_VERSION ')[1].split('\n')[0].strip().strip('"')
 if not bundle
     pkg.generate(raylib_subproject.target('raylib'), name: 'RayFEM raylib',
